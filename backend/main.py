@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 # 导入自定义服务模块
 from services.link_validator import LinkValidator, LinkValidationResult
 from services.consistency_scorer import ConsistencyScorer, ConsistencyScore
+from services.evidence_chain_generator import EvidenceChainGenerator, EvidenceChain
 
 # 配置日志
 logging.basicConfig(
@@ -80,6 +81,12 @@ class FactCheckResponse(BaseModel):
     link_validation: Optional[Dict[str, Any]] = Field(None, description="链接活性检测结果")
     consistency_score: Optional[Dict[str, Any]] = Field(None, description="一致性评分结果")
 
+# 证据链请求/响应模型
+class EvidenceChainRequest(BaseModel):
+    claim: str = Field(..., description="待核查的说法", min_length=1, max_length=500)
+    enable_link_validation: bool = Field(False, description="是否验证链接活性")
+    top_k: int = Field(5, description="返回Top K个证据", ge=1, le=20)
+
 # 搜索结果模型
 class SearchResult(BaseModel):
     name: str
@@ -90,7 +97,7 @@ class SearchResult(BaseModel):
 # 创建FastAPI应用
 app = FastAPI(
     title="事实核查插件后端服务",
-    description="基于博查AI + GLM-5的事实核查API，支持深度思考模式与流式输出",
+    description="基于夸克搜索 + GLM-5的事实核查API，支持深度思考模式与流式输出",
     version="2.0.0",
     docs_url=None,  # 生产环境关闭文档
     redoc_url=None
@@ -108,6 +115,7 @@ app.add_middleware(
 # 初始化服务组件
 link_validator = LinkValidator(timeout=10.0)
 consistency_scorer = ConsistencyScorer()
+evidence_chain_generator = EvidenceChainGenerator()
 
 # 初始化GLM客户端
 try:
@@ -717,14 +725,16 @@ async def root():
         "version": "2.0.0",
         "status": "running",
         "features": [
-            "博查AI搜索",
+            "智谱AI搜索",
             "GLM-5推理（支持深度思考模式）",
             "链接活性检测",
             "一致性评分",
+            "证据链生成",
             "流式输出（实验性）"
         ],
         "endpoints": {
             "fact_check": "/api/v1/check",
+            "evidence_chain": "/api/v1/evidence-chain",
             "health": "/health",
             "link_validate": "/api/v1/validate-links",
             "consistency_check": "/api/v1/check-consistency"
@@ -791,6 +801,95 @@ async def check_consistency(ai_text: str, source_text: str):
     except Exception as e:
         logger.error(f"一致性评分异常: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/v1/evidence-chain")
+async def generate_evidence_chain(request: EvidenceChainRequest):
+    """
+    证据链生成API（为前端提供结构化证据链数据）
+
+    功能：
+    - 证据排序和分类（支持/反对/中性）
+    - 证据高亮和标签
+    - 统计信息和分析
+    - 可选的链接验证
+
+    Args:
+        request: 证据链生成请求
+
+    Returns:
+        Dict: 结构化的证据链数据
+    """
+    try:
+        logger.info(f"开始生成证据链: {request.claim}")
+        logger.info(f"配置 - 链接验证: {request.enable_link_validation}, Top K: {request.top_k}")
+
+        # 步骤1: 使用智谱AI联网搜索
+        search_results = await search_with_zhipu(request.claim)
+
+        # 步骤2: 如果没有有效结果，返回空证据链
+        if not search_results:
+            logger.warning("未找到有效搜索结果")
+            return {
+                "claim": request.claim,
+                "verdict": "信息不足，无法判断",
+                "confidence": 0.0,
+                "supporting_evidence": [],
+                "opposing_evidence": [],
+                "neutral_evidence": [],
+                "reasoning_summary": "未找到相关搜索结果",
+                "key_findings": [],
+                "uncertainty_note": "未找到权威信息源",
+                "total_evidence": 0,
+                "authoritative_sources": 0,
+                "average_score": 0.0,
+                "generated_at": None,
+                "processing_time_ms": 0.0
+            }
+
+        # 步骤3: 将搜索结果转换为字典格式
+        search_results_dicts = [
+            {
+                "title": result.name,
+                "url": result.url,
+                "summary": result.summary,
+                "date_published": result.date_published
+            }
+            for result in search_results
+        ]
+
+        # 步骤4: 生成证据链
+        evidence_chain = await evidence_chain_generator.generate_evidence_chain(
+            claim=request.claim,
+            search_results=search_results_dicts,
+            enable_link_validation=request.enable_link_validation,
+            top_k=request.top_k
+        )
+
+        # 步骤5: 转换为字典返回
+        result = {
+            "claim": evidence_chain.claim,
+            "verdict": evidence_chain.verdict,
+            "confidence": evidence_chain.confidence,
+            "supporting_evidence": evidence_chain.supporting_evidence,
+            "opposing_evidence": evidence_chain.opposing_evidence,
+            "neutral_evidence": evidence_chain.neutral_evidence,
+            "reasoning_summary": evidence_chain.reasoning_summary,
+            "key_findings": evidence_chain.key_findings,
+            "uncertainty_note": evidence_chain.uncertainty_note,
+            "total_evidence": evidence_chain.total_evidence,
+            "authoritative_sources": evidence_chain.authoritative_sources,
+            "average_score": evidence_chain.average_score,
+            "generated_at": evidence_chain.generated_at,
+            "processing_time_ms": evidence_chain.processing_time_ms
+        }
+
+        logger.info(f"证据链生成完成: {evidence_chain.total_evidence} 个证据")
+        return result
+
+    except Exception as e:
+        logger.error(f"证据链生成异常: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"证据链生成失败: {str(e)}")
+
 
 @app.get("/health")
 async def health():
