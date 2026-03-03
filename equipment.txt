@@ -1,0 +1,380 @@
+# 事实核查AI网页插件 - 依赖和环境清单
+
+更新日期：2026-01-13
+
+## 开发环境要求
+
+### 基础环境
+- **Python**: 3.10+
+- **Node.js**: v22.21.0 (用户调研工具已测试)
+- **npm**: 11.6.2+
+- **Git**: 最新版本
+
+### 浏览器开发
+- Google Chrome (最新版本)
+- Chrome Developer Tools
+- React Developer Tools (浏览器扩展)
+
+## 项目结构说明
+
+本项目包含三个主要部分：
+1. **scenario-research/**: 用户调研工具（已实现，React + Vite）
+2. **extension/**: Chrome插件（开发中）
+3. **backend/**: 后端服务（开发中）
+
+---
+
+## 1. 用户调研工具依赖 (scenario-research/)
+
+**状态**: ✅ 已完成开发并部署
+**用途**: 用户调研和测试不同场景、风险类型、介入方式的用户偏好
+
+### 核心依赖
+```json
+{
+  "react": "^18.3.1",
+  "react-dom": "^18.3.1"
+}
+```
+
+### 构建工具
+```json
+{
+  "vite": "^5.4.11"
+}
+```
+
+### 样式和UI
+```json
+{
+  "tailwindcss": "^3.4.17",
+  "autoprefixer": "^10.4.20",
+  "postcss": "^8.4.49",
+  "lucide-react": "^0.468.0"
+}
+```
+
+### 快速启动
+```bash
+cd scenario-research
+npm install
+npm run dev      # 访问 http://localhost:3000
+npm run build    # 生产构建
+npm run preview  # 预览生产构建
+```
+
+### 功能特点
+- 5个高保真场景（微信群、社交媒体、知乎、百度、AI助手）
+- **预览页/详情页高保真区分**：所有场景提供预览和详情两种界面
+  - 微信群聊：群聊消息列表 vs 文章内容页
+  - 社交媒体：瀑布流推荐 vs 笔记详情页
+  - 知乎问答：问题列表 vs 问答详情页
+  - 搜索引擎：搜索结果 vs 网页内容
+  - AI助手：对话历史列表 vs 完整对话
+- 3种风险类型（养生谣言、财产诈骗、社会新闻）
+- 4种介入方式（弹窗、气泡、右键菜单、日报）
+- AI幻觉内容展示
+- **"分享后链路"行为追踪**（核心创新）
+  - 基于用户访谈洞察设计
+  - 为每个场景提供情境化行为选项
+  - 家庭微信群特别提供"保全面子"选项（私聊、小群商议、委婉提醒等）
+- 6步用户调研流程
+- 完整数据记录（场景、风险、介入方式、用户行为、评分）
+
+---
+
+## 2. Chrome插件依赖 (extension/) - 开发中
+
+### 核心框架
+- React 18+
+- TypeScript 5+
+- Manifest V3
+
+### 构建工具
+- Vite / Webpack
+- ESLint + Prettier
+
+### UI组件库 (可选)
+- Ant Design
+- Material-UI (MUI)
+- Chakra UI
+
+### 状态管理
+- React Context
+- React Query (数据获取)
+
+### 前端依赖包清单
+```
+react
+react-dom
+typescript
+@types/react
+@types/react-dom
+@types/chrome
+vite
+eslint
+prettier
+```
+
+## 3. 后端服务依赖 (backend/) - 开发中
+
+### 核心框架
+- FastAPI 0.104+
+- Uvicorn (ASGI服务器)
+- Pydantic (数据验证)
+
+### HTTP客户端
+- httpx (异步HTTP客户端)
+- aiohttp (备选)
+
+### 缓存
+- redis
+- aioredis (异步Redis客户端)
+
+### 部署相关
+- Docker
+- Docker Compose
+- gunicorn (生产环境)
+
+### 后端依赖包清单
+```
+fastapi
+uvicorn
+pydantic
+httpx
+redis
+aioredis
+python-dotenv
+gunicorn
+pytest
+pytest-asyncio
+```
+
+## 外部API服务
+
+### 搜索服务
+- **Bing Search API v7**
+  - 需要Microsoft Azure账户
+  - API密钥管理
+  - 搜索次数配额
+
+### 大语言模型API (选择其一)
+- **DeepSeek API**
+  - 国内访问稳定
+  - 中文理解能力强
+  - 需要API密钥
+
+- **通义千问API (Qwen)**
+  - 阿里云服务
+  - 支持中文场景
+  - 需要阿里云账户
+
+- **Moonshot API**
+  - Kimi模型提供商
+  - 长文本处理能力强
+  - 需要API密钥
+
+### 备选LLM服务
+- OpenAI API (需要代理)
+- Claude API (需要代理)
+- 本地模型 (Ollama + Qwen-1.8B-Chat)
+
+## 数据存储
+
+### 缓存服务
+- Redis Cloud (免费层)
+- 本地Redis实例
+- 备选: 内存缓存 (开发阶段)
+
+### 文件存储 (可选)
+- 本地文件系统
+- 阿里云OSS
+- 腾讯云COS
+
+## 开发工具和IDE
+
+### 推荐IDE
+- Visual Studio Code
+  - 扩展: Python, TypeScript, React, Docker
+- WebStorm (付费)
+- PyCharm (付费)
+
+### 版本控制
+- Git
+- GitHub / Gitee
+
+### API测试工具
+- Postman
+- Insomnia
+- curl命令行
+
+### 浏览器调试
+- Chrome DevTools
+- React Developer Tools
+
+## 部署平台
+
+### 后端部署 (选择其一)
+- Vercel (推荐，免费层充足)
+- Render (免费层)
+- Railway (免费层)
+- 阿里云函数计算
+- 腾讯云函数
+
+### 前端分发
+- Chrome Web Store
+- Edge Add-ons Store
+- 直接安装 (开发阶段)
+
+## 监控和分析 (可选)
+
+### 性能监控
+- Google Analytics
+- 阿里云ARMS
+- 腾讯云RUM
+
+### 错误追踪
+- Sentry (免费层)
+
+### 日志管理
+- 云服务日志
+- 本地日志文件
+
+## 安全和合规
+
+### API密钥管理
+- 环境变量 (.env文件)
+- 服务器密钥管理
+- 避免硬编码
+
+### 数据保护
+- 不存储用户敏感信息
+- 匿名化处理
+- 符合隐私法规
+
+## 开发成本估算
+
+### API费用 (月度)
+- Bing Search API: $0-20 (根据使用量)
+- LLM API: $10-50 (根据使用量和模型选择)
+- Redis Cloud: $0 (免费层)
+- 部署平台: $0-10 (免费层或小额费用)
+
+### 总成本预估
+- 开发阶段: $0-30/月
+- 生产阶段: $20-100/月 (根据用户规模)
+
+## 环境配置文件模板
+
+### .env 文件示例
+```env
+# Bing Search API
+BING_SEARCH_API_KEY=your_bing_api_key_here
+BING_SEARCH_ENDPOINT=https://api.bing.microsoft.com/v7.0/search
+
+# LLM API (选择其一)
+DEEPSEEK_API_KEY=your_deepseek_api_key_here
+QWEN_API_KEY=your_qwen_api_key_here
+MOONSHOT_API_KEY=your_moonshot_api_key_here
+
+# Redis (可选)
+REDIS_URL=redis://localhost:6379
+REDIS_PASSWORD=your_redis_password
+
+# 应用配置
+APP_ENV=development
+APP_DEBUG=true
+LOG_LEVEL=info
+```
+
+### package.json 示例片段
+```json
+{
+  "name": "fact-check-extension",
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "lint": "eslint src --ext ts,tsx",
+    "format": "prettier --write src/**/*.{ts,tsx,css,md}"
+  }
+}
+```
+
+### requirements.txt 示例
+```
+fastapi>=0.104.0
+uvicorn>=0.24.0
+pydantic>=2.5.0
+httpx>=0.25.0
+redis>=5.0.0
+aioredis>=2.0.0
+python-dotenv>=1.0.0
+gunicorn>=21.0.0
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+```
+
+## 安装步骤
+
+### 选项1: 仅使用用户调研工具
+```bash
+cd scenario-research
+npm install
+npm run dev
+# 访问 http://localhost:3000
+```
+
+### 选项2: 完整开发环境（包括插件和后端）
+
+#### 1. 克隆项目
+```bash
+git clone [repository-url]
+cd 交互-毕业论文
+```
+
+#### 2. 安装用户调研工具依赖
+```bash
+cd scenario-research
+npm install
+```
+
+#### 3. 安装后端依赖
+```bash
+cd backend
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+#### 4. 安装插件依赖
+```bash
+cd extension
+npm install
+```
+
+### 4. 配置环境变量
+```bash
+cp .env.example .env
+# 编辑 .env 文件，填入API密钥
+```
+
+### 5. 启动开发服务器
+```bash
+# 启动后端
+cd backend
+uvicorn app.main:app --reload --port 8000
+
+# 启动前端 (新终端)
+cd extension
+npm run dev
+```
+
+## 注意事项
+
+1. **API密钥安全**: 绝对不要将API密钥提交到版本控制系统
+2. **跨域问题**: 开发时需要配置CORS允许插件访问后端
+3. **浏览器权限**: 插件需要在manifest.json中声明必要权限
+4. **性能优化**: 注意API调用频率限制，实现适当的缓存策略
+5. **错误处理**: 完善的错误处理和用户友好的错误提示

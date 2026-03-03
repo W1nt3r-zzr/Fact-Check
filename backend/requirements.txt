@@ -1,0 +1,17 @@
+# 事实核查插件后端服务依赖包
+
+# Web框架
+fastapi>=0.100.0
+uvicorn>=0.20.0
+
+# HTTP客户端
+httpx>=0.20.0
+
+# AI模型SDK - GLM-4.5-Flash
+zai-sdk>=0.0.3
+
+# 数据验证
+pydantic>=2.0.0
+
+# 环境变量管理
+python-dotenv>=1.0.0
