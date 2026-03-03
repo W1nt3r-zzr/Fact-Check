@@ -1,0 +1,7 @@
+2026-03-02 11:43:16,299 - INFO - GLM-5客户端初始化成功（支持深度思考模式与流式输出）
+INFO:     Started server process [22383]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+ERROR:    [Errno 48] error while attempting to bind on address ('0.0.0.0', 8000): address already in use
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
