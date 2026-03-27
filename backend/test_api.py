@@ -9,7 +9,7 @@ payload = {
     "enable_consistency_check": False
 }
 
-print("发送事实核查请求...")
+print("发送信息核查请求...")
 print(f"查询: {payload['claim']}")
 print("=" * 60)
 

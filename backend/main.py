@@ -1,6 +1,6 @@
 """
-事实核查插件后端服务
-基于博查AI Web Search + GLM-5的事实核查服务
+信息核查插件后端服务
+基于博查AI Web Search + GLM-5的信息核查服务
 面向中国普通网民的浏览器插件后端API
 
 支持功能：
@@ -67,6 +67,7 @@ class FactCheckRequest(BaseModel):
     stream: bool = Field(False, description="是否启用流式输出")
     enable_link_validation: bool = Field(False, description="是否启用链接活性检测")
     enable_consistency_check: bool = Field(False, description="是否启用一致性评分")
+    enable_evidence_chain: bool = Field(False, description="是否启用证据链生成")
 
 class FactCheckResponse(BaseModel):
     verdict: str = Field(..., description="核查结论：属实 / 不实 / 信息不足，无法判断")
@@ -75,11 +76,13 @@ class FactCheckResponse(BaseModel):
     search_keywords: str = Field(..., description="搜索关键词")
     uncertainty_note: str = Field(..., description="不确定性说明")
     reasoning: str = Field(..., description="推理过程说明")
+    confidence: Optional[float] = Field(None, description="置信度（0-100）")
 
     # 新增：验证信息和思考过程
     thinking_process: Optional[str] = Field(None, description="深度思考过程（如果启用）")
     link_validation: Optional[Dict[str, Any]] = Field(None, description="链接活性检测结果")
     consistency_score: Optional[Dict[str, Any]] = Field(None, description="一致性评分结果")
+    evidence_chain: Optional[Dict[str, Any]] = Field(None, description="证据链数据（如果启用）")
 
 # 证据链请求/响应模型
 class EvidenceChainRequest(BaseModel):
@@ -96,8 +99,8 @@ class SearchResult(BaseModel):
 
 # 创建FastAPI应用
 app = FastAPI(
-    title="事实核查插件后端服务",
-    description="基于夸克搜索 + GLM-5的事实核查API，支持深度思考模式与流式输出",
+    title="信息核查插件后端服务",
+    description="基于夸克搜索 + GLM-5的信息核查API，支持深度思考模式与流式输出",
     version="2.0.0",
     docs_url=None,  # 生产环境关闭文档
     redoc_url=None
@@ -106,8 +109,8 @@ app = FastAPI(
 # 添加CORS中间件
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=config.ALLOWED_ORIGINS,
-    allow_credentials=True,
+    allow_origins=["*"],  # 允许所有来源（支持content script从任意网页请求）
+    allow_credentials=False,  # 允许所有来源时必须设为False
     allow_methods=["*"],
     allow_headers=["*"]
 )
@@ -115,7 +118,6 @@ app.add_middleware(
 # 初始化服务组件
 link_validator = LinkValidator(timeout=10.0)
 consistency_scorer = ConsistencyScorer()
-evidence_chain_generator = EvidenceChainGenerator()
 
 # 初始化GLM客户端
 try:
@@ -131,6 +133,9 @@ except ImportError:
 except Exception as e:
     logger.error(f"GLM客户端初始化失败: {e}")
     zhipu_client = None
+
+# 初始化证据链生成器（在GLM客户端初始化之后，以便传入客户端用于立场检测）
+evidence_chain_generator = EvidenceChainGenerator(glm_client=zhipu_client)
 
 
 async def search_with_zhipu(claim: str) -> List[SearchResult]:
@@ -213,42 +218,25 @@ async def search_with_zhipu(claim: str) -> List[SearchResult]:
 def extract_structured_info_from_reasoning(reasoning_text: str) -> Dict[str, Any]:
     """从GLM的自然语言分析中提取结构化信息（支持Markdown格式）"""
 
-    # 默认结构
+    # 默认结构 - verdict现在完全由证据链模块生成，这里不做提取
     result = {
-        "verdict": "信息不足，无法判断",
+        "verdict": "详见下方证据链分析",  # 固定默认值，不尝试从推理中提取
         "evidence_quote": "无",
         "source_url": "",
         "search_keywords": "",
         "uncertainty_note": "无",
-        "reasoning": reasoning_text[:1000] + "..." if len(reasoning_text) > 1000 else reasoning_text
+        "reasoning": reasoning_text[:4000] + "...\n\n[内容过长，已截断。完整推理请参考证据分析]" if len(reasoning_text) > 4000 else reasoning_text
     }
 
     if not reasoning_text:
         return result
 
     try:
-        # 1. 提取verdict（结论判断）- 支持Markdown格式
-        verdict_patterns = [
-            r'###\s*1[\.、]\s*.*?结论[判断]{0,2}.*?\n+\*?\*(.+?)\*?\*',  # Markdown: ### 1. 结论判断\n**内容**
-            r'###\s*\d+[\.、]\s*.*?结论[判断]{0,2}.*?\n+\*?\*(.+?)\*?\*',  # 通用Markdown格式
-            r'结论判断[：:]\s*(.+?)[。,;\n]',
-            r'结论[：:]\s*(.+?)[。,;\n]',
-            r'判定[：:]\s*(.+?)[。,;\n]',
-            r'(属实|不实|信息不足[，,]无法判断)'
-        ]
+        # 不再提取verdict - 结论完全由证据链模块生成
+        # 推理过程专注于证据分析，不包含结论判断
 
-        for pattern in verdict_patterns:
-            match = re.search(pattern, reasoning_text, re.IGNORECASE | re.MULTILINE)
-            if match:
-                verdict = match.group(1).strip()
-                verdict = re.sub(r'\*\*', '', verdict)  # 去除Markdown加粗符号
-                if "属实" in verdict:
-                    result["verdict"] = "属实"
-                elif "不实" in verdict:
-                    result["verdict"] = "不实"
-                elif "信息不足" in verdict:
-                    result["verdict"] = "信息不足，无法判断"
-                break
+        # 提取evidence_quote（关键证据）- 支持Markdown格式
+        # 首先尝试找到"关键引用"部分
 
         # 2. 提取evidence_quote（关键证据）- 支持Markdown格式
         # 首先尝试找到"### 2. 关键证据"部分
@@ -369,7 +357,7 @@ def extract_structured_info_from_reasoning(reasoning_text: str) -> Dict[str, Any
 def format_evidence_list(evidence: List[SearchResult]) -> str:
     """格式化证据列表为指定格式"""
     evidence_text = ""
-    for i, item in enumerate(evidence, 1):
+    for item in evidence:
         evidence_text += f"""- [{item.name}]({item.url})
   摘要：{item.summary}
   发布时间：{item.date_published}
@@ -385,7 +373,7 @@ def build_glm_prompt(claim: str, evidence_list: List[SearchResult]) -> str:
     from datetime import datetime
     current_date = datetime.now().strftime("%Y年%m月%d日")
 
-    prompt = f"""你是一名专业的事实核查助手，具有联网搜索能力，请帮助我分析以下说法的可信度。
+    prompt = f"""你是一名专业的信息核查助手，具有联网搜索能力，请帮助我分析以下说法的可信度。
 
 【重要提示】
 - **当前日期**：{current_date}
@@ -400,23 +388,60 @@ def build_glm_prompt(claim: str, evidence_list: List[SearchResult]) -> str:
 {evidence_text}
 
 【分析任务】
-请基于上述**实时联网搜索**获得的证据进行客观分析，并给出你的推理过程。请按以下结构进行分析：
+请基于上述**实时联网搜索**获得的证据进行客观分析，重点展示证据分析和推理过程。
 
-1. **结论判断**：这个说法是属实、不实，还是信息不足无法判断？
-2. **关键证据**：从证据中引用最重要的一句话
-3. **证据来源**：提供最有力证据的URL链接
-4. **分析过程**：详细说明你是如何根据证据得出结论的
-5. **不确定性**：是否存在信息缺口或需要注意的地方？
+**⚠️ 格式要求（必须严格遵守）**
 
-【分析要求】
-- 严格基于提供的**实时证据**，不要编造信息
-- 信任搜索结果中的日期，它们反映真实的时间线
-- 推理要清晰、客观、有逻辑
-- 如果证据不足或矛盾，请明确指出
-- 引用的证据必须忠实原文
-- 推理要清晰、客观、有逻辑
-- 重点展示分析过程，让读者能够理解你的判断依据
-- 如果证据不足或矛盾，请明确指出
+请严格按照以下格式输出每个证据的立场分析：
+
+```
+### 1. 证据立场分析
+
+*   **证据 [1] [证据标题](证据URL)**
+    *   **立场**：**支持**（请选择：支持/反对/中性，三者选一）
+    *   **分析**：简要说明该证据为何持此立场（基于来源权威性、时效性等）
+
+*   **证据 [2] [证据标题](证据URL)**
+    *   **立场**：**支持**
+    *   **分析**：简要说明...
+
+（以此类推，逐一分析所有证据）
+```
+
+**格式说明**：
+- 每个证据必须单独列出，使用`*   **证据 [序号] [标题](URL)**`格式
+- 立场必须是以下三个词之一：**支持**、**反对**、**中性**（不要使用"强支持"、"部分支持"等其他表述）
+- 序号从1开始，依次递增
+- 每个证据必须包含标题和URL（URL必须用Markdown链接格式）
+
+请按以下结构进行分析：
+
+1. **证据立场分析**：逐一分析各个证据对该说法的立场
+   - **必须使用上述指定格式**，格式不正确会导致系统无法提取立场信息
+   - 明确指出每个证据是"支持"、"反对"还是"中性"（三者选一）
+   - 说明证据的可信度（基于来源权威性、时效性等）
+
+2. **关键引用**：从证据中引用最重要的句子
+   - 使用Markdown链接格式：[证据标题](URL)
+   - 引用能体现证据立场的关键内容
+
+3. **证据关系分析**：说明不同证据之间的关系
+   - 支持性证据之间是否相互印证
+   - 反对性证据的反对理由是什么
+   - 证据之间是否存在矛盾
+
+4. **不确定性与局限**：指出信息缺口和需要注意的地方
+   - 证据数量是否充足
+   - 时效性问题
+   - 信息来源的局限性
+
+【重要约束】
+- **严格禁止**在分析中给出任何形式的最终结论或判定
+- **不要说**"综上所述..."、"因此..."、"判断为..."等总结性语句
+- **不要使用**"属实"、"不实"、"部分属实"等结论性词汇
+- 专注于**分析证据本身**，而非给出结论
+- 结论由专门的证据链统计模块基于证据立场分布自动生成
+- **必须严格遵守上述格式要求**，否则立场提取会失败
 
 请开始你的分析："""
 
@@ -458,7 +483,7 @@ async def call_glm_api(
             "model": config.GLM_MODEL,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.3,
-            "max_tokens": 3000,  # GLM-5支持更多token
+            "max_tokens": 8000,  # 增加到8000以确保完整输出推理过程
             "stream": stream,
         }
 
@@ -614,10 +639,130 @@ async def call_glm_api_streaming(prompt: str, enable_thinking: bool = True):
         logger.error(f"流式API调用失败: {e}")
         yield {"type": "error", "content": str(e)}
 
+@app.post("/api/v1/check/stream")
+async def fact_check_stream(request: FactCheckRequest):
+    """
+    流式核查接口（返回Server-Sent Events）
+
+    优势：实时显示AI思考过程，提升用户体验
+    """
+    from fastapi.responses import StreamingResponse
+
+    logger.info(f"开始流式核查: {request.claim}")
+
+    async def generate():
+        try:
+            # 步骤1: 搜索证据
+            yield f"event: progress\ndata: {{\"stage\": \"searching\", \"message\": \"正在联网搜索证据...\"}}\n\n"
+            search_results = await search_with_zhipu(request.claim)
+
+            if not search_results:
+                yield f"event: error\ndata: {{\"message\": \"未找到相关搜索结果\"}}\n\n"
+                return
+
+            yield f"event: progress\ndata: {{\"stage\": \"found\", \"message\": \"找到 {len(search_results)} 个相关证据，开始AI分析...\"}}\n\n"
+
+            # 步骤2: 构造Prompt
+            prompt = build_glm_prompt(request.claim, search_results)
+
+            # 步骤3: 流式调用GLM-5
+            request_params = {
+                "model": config.GLM_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.3,
+                "max_tokens": 6000,  # 流式模式可以稍大
+                "stream": True,
+            }
+
+            if request.enable_thinking:
+                logger.info("深度思考模式已启用（GLM-5原生支持）")
+
+            response = zhipu_client.chat.completions.create(**request_params)
+
+            full_content = ""
+            thinking_content = ""
+
+            # 流式输出
+            for chunk in response:
+                if chunk.choices and chunk.choices[0].delta:
+                    delta = chunk.choices[0].delta
+
+                    # 思考过程
+                    if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                        thinking_content += delta.reasoning_content
+                        # 发送思考片段
+                        yield f"event: thinking\ndata: {{\"content\": {json.dumps(delta.reasoning_content)}, \"finished\": false}}\n\n"
+
+                    # 正式内容
+                    elif hasattr(delta, 'content') and delta.content:
+                        full_content += delta.content
+                        # 发送内容片段
+                        yield f"event: content\ndata: {{\"content\": {json.dumps(delta.content)}, \"finished\": false}}\n\n"
+
+            # 完成
+            yield f"event: progress\ndata: {{\"stage\": \"processing\", \"message\": \"正在生成证据链...\"}}\n\n"
+
+            # 步骤4: 生成证据链
+            if request.enable_evidence_chain:
+                search_results_dicts = [
+                    {
+                        "title": result.name,
+                        "url": result.url,
+                        "summary": result.summary,
+                        "date_published": result.date_published
+                    }
+                    for result in search_results
+                ]
+
+                evidence_chain = await evidence_chain_generator.generate_evidence_chain(
+                    claim=request.claim,
+                    search_results=search_results_dicts,
+                    enable_link_validation=False,
+                    top_k=10,
+                    reasoning_text=full_content
+                )
+
+                # 返回完整结果
+                result_data = {
+                    "verdict": evidence_chain.verdict,
+                    "confidence": evidence_chain.confidence,
+                    "reasoning": full_content,
+                    "evidence_chain": {
+                        "supporting_evidence": evidence_chain.supporting_evidence,
+                        "opposing_evidence": evidence_chain.opposing_evidence,
+                        "neutral_evidence": evidence_chain.neutral_evidence,
+                        "total_evidence": evidence_chain.total_evidence,
+                        "ai_summary": evidence_chain.ai_summary
+                    }
+                }
+
+                yield f"event: done\ndata: {json.dumps(result_data, ensure_ascii=False)}\n\n"
+            else:
+                # 没有证据链，只返回基本结果
+                result_data = {
+                    "verdict": "信息不足，无法判断",
+                    "reasoning": full_content
+                }
+                yield f"event: done\ndata: {json.dumps(result_data, ensure_ascii=False)}\n\n"
+
+        except Exception as e:
+            logger.error(f"流式核查失败: {e}", exc_info=True)
+            yield f"event: error\ndata: {{\"message\": \"{str(e)}\"}}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
 @app.post("/api/v1/check", response_model=FactCheckResponse)
 async def fact_check(request: FactCheckRequest):
     """
-    事实核查主接口（支持GLM-5深度思考模式）
+    信息核查主接口（支持GLM-5深度思考模式）
 
     新功能：
     - 深度思考模式（enable_thinking）
@@ -642,7 +787,7 @@ async def fact_check(request: FactCheckRequest):
                 source_url="",
                 search_keywords=request.claim,
                 uncertainty_note="未找到权威信息源",
-                reasoning="博查AI未返回相关搜索结果，无法进行事实核查",
+                reasoning="博查AI未返回相关搜索结果，无法进行信息核查",
                 thinking_process=None,
                 link_validation=None,
                 consistency_score=None
@@ -697,31 +842,85 @@ async def fact_check(request: FactCheckRequest):
             consistency_result = consistency_report
             logger.info(f"一致性评分完成: {consistency_score.overall_score}/100")
 
-        # 步骤7: 返回结果
+        # 步骤7: 证据链生成（可选）
+        evidence_chain_result = None
+        confidence_value = None
+
+        if request.enable_evidence_chain:
+            logger.info("开始生成证据链...")
+
+            # 将搜索结果转换为字典格式
+            search_results_dicts = [
+                {
+                    "title": result.name,
+                    "url": result.url,
+                    "summary": result.summary,
+                    "date_published": result.date_published
+                }
+                for result in search_results
+            ]
+
+            # 生成证据链（传入推理文本用于提取证据立场）
+            reasoning_text = reasoning_result.get("reasoning", "")
+            evidence_chain = await evidence_chain_generator.generate_evidence_chain(
+                claim=request.claim,
+                search_results=search_results_dicts,
+                enable_link_validation=False,  # 已在前面处理过
+                top_k=10,
+                reasoning_text=reasoning_text  # 传入推理文本用于提取证据立场
+            )
+
+            # 转换为字典格式
+            evidence_chain_result = {
+                "supporting_evidence": evidence_chain.supporting_evidence,
+                "opposing_evidence": evidence_chain.opposing_evidence,
+                "neutral_evidence": evidence_chain.neutral_evidence,
+                "key_findings": evidence_chain.key_findings,
+                "total_evidence": evidence_chain.total_evidence,
+                "authoritative_sources": evidence_chain.authoritative_sources,
+                "average_score": evidence_chain.average_score,
+                "ai_summary": evidence_chain.ai_summary  # 添加AI归纳总结
+            }
+
+            confidence_value = evidence_chain.confidence
+            logger.info(f"证据链生成完成: {evidence_chain.total_evidence} 个证据, 置信度: {confidence_value}%")
+
+        # 步骤8: 返回结果
         elapsed_time = (time.time() - start_time) * 1000
         logger.info(f"核查完成，耗时: {elapsed_time:.1f}ms")
 
+        # 如果启用了证据链，使用证据链的结论和置信度（更准确）
+        if request.enable_evidence_chain and evidence_chain:
+            final_verdict = evidence_chain.verdict
+            final_confidence = evidence_chain.confidence
+            logger.info(f"使用证据链结论: {final_verdict}, 置信度: {final_confidence}%")
+        else:
+            final_verdict = reasoning_result.get("verdict", "信息不足，无法判断")
+            final_confidence = confidence_value
+
         return FactCheckResponse(
-            verdict=reasoning_result.get("verdict", "信息不足，无法判断"),
+            verdict=final_verdict,
             evidence_quote=reasoning_result.get("evidence_quote", "无"),
             source_url=reasoning_result.get("source_url", ""),
             search_keywords=reasoning_result.get("search_keywords", request.claim),
             uncertainty_note=reasoning_result.get("uncertainty_note", "无"),
             reasoning=reasoning_result.get("reasoning", "推理过程未提供"),
+            confidence=final_confidence,
             thinking_process=reasoning_result.get("thinking_process"),
             link_validation=link_validation_result,
-            consistency_score=consistency_result
+            consistency_score=consistency_result,
+            evidence_chain=evidence_chain_result
         )
 
     except Exception as e:
-        logger.error(f"事实核查异常: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="事实核查服务异常")
+        logger.error(f"信息核查异常: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="信息核查服务异常")
 
 @app.get("/")
 async def root():
     """服务状态检查"""
     return {
-        "service": "事实核查插件后端（GLM-5增强版）",
+        "service": "信息核查插件后端（GLM-5增强版）",
         "version": "2.0.0",
         "status": "running",
         "features": [

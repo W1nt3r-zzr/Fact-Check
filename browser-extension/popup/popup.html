@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI信息核查助手</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <!-- 头部 -->
+    <header class="header">
+      <h1 class="title">🔍 AI信息核查</h1>
+      <p class="subtitle">基于GLM-5的智能验证</p>
+    </header>
+
+    <!-- 选中的文字显示 -->
+    <section class="input-section">
+      <div class="section-title">待核查内容</div>
+      <div id="claimText" class="claim-text">
+        请在网页上选中要核查的文字...
+      </div>
+    </section>
+
+    <!-- 操作按钮 -->
+    <section class="action-section">
+      <button id="checkBtn" class="btn-primary" disabled>
+        <span class="btn-icon">⚡</span>
+        开始核查
+      </button>
+      <button id="clearBtn" class="btn-secondary">
+        清空
+      </button>
+    </section>
+
+    <!-- 加载动画 -->
+    <div id="loading" class="loading hidden">
+      <div class="spinner"></div>
+      <p class="loading-text">正在核查中...</p>
+      <p class="loading-hint">这可能需要10-30秒</p>
+    </div>
+
+    <!-- 结果显示区域 -->
+    <div id="resultArea" class="result-area hidden">
+      <!-- 结论部分 -->
+      <div class="verdict-section">
+        <h2 class="section-title">核查结论</h2>
+        <div class="verdict-container">
+          <div id="verdictBadge" class="verdict-badge"></div>
+          <div id="verdictText" class="verdict-text"></div>
+        </div>
+        <div id="confidenceInfo" class="confidence-info"></div>
+      </div>
+
+      <!-- 推理过程 -->
+      <div id="reasoningSection" class="reasoning-section hidden">
+        <h3 class="section-title">推理过程</h3>
+        <div id="reasoningText" class="reasoning-text"></div>
+      </div>
+
+      <!-- 证据链 -->
+      <div id="evidenceSection" class="evidence-section hidden">
+        <h3 class="section-title">证据链</h3>
+
+        <!-- 支持性证据 -->
+        <div id="supportingEvidence" class="evidence-group hidden">
+          <h4 class="evidence-group-title">✅ 支持性证据</h4>
+          <div id="supportingList" class="evidence-list"></div>
+        </div>
+
+        <!-- 反对性证据 -->
+        <div id="opposingEvidence" class="evidence-group hidden">
+          <h4 class="evidence-group-title">❌ 反对性证据</h4>
+          <div id="opposingList" class="evidence-list"></div>
+        </div>
+
+        <!-- 中性证据 -->
+        <div id="neutralEvidence" class="evidence-group hidden">
+          <h4 class="evidence-group-title">⚪ 中性证据</h4>
+          <div id="neutralList" class="evidence-list"></div>
+        </div>
+      </div>
+
+      <!-- 统计信息 -->
+      <div id="statsSection" class="stats-section hidden">
+        <h3 class="section-title">统计信息</h3>
+        <div class="stats-grid">
+          <div class="stat-item">
+            <span class="stat-label">总证据数</span>
+            <span id="totalCount" class="stat-value">-</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-label">权威来源</span>
+            <span id="authorityCount" class="stat-value">-</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-label">平均评分</span>
+            <span id="avgScore" class="stat-value">-</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 关键发现 -->
+      <div id="findingsSection" class="findings-section hidden">
+        <h3 class="section-title">关键发现</h3>
+        <ul id="findingsList" class="findings-list"></ul>
+      </div>
+
+      <!-- 不确定性说明 -->
+      <div id="uncertaintySection" class="uncertainty-section hidden">
+        <h3 class="section-title">⚠️ 注意事项</h3>
+        <p id="uncertaintyText" class="uncertainty-text"></p>
+      </div>
+    </div>
+
+    <!-- 错误提示 -->
+    <div id="errorArea" class="error-area hidden">
+      <div class="error-icon">⚠️</div>
+      <p id="errorText" class="error-text"></p>
+    </div>
+
+    <!-- 底部信息 -->
+    <footer class="footer">
+      <p class="footer-text">由 GLM-5 驱动 | 后端服务需先启动</p>
+    </footer>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

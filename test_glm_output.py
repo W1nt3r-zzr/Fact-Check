@@ -1,7 +1,7 @@
 import requests
 import json
 
-# 测试事实核查API
+# 测试信息核查API
 url = "http://localhost:8000/api/v1/check"
 payload = {
     "claim": "伊朗总统哈梅内伊死了没有",

@@ -27,6 +27,7 @@ class RankedEvidence:
     tier: str  # 信源等级 (Tier 1/2/3)
     publish_date: Optional[str]
     domain: str
+    stance: str = "neutral"  # 证据立场: support/oppose/neutral
 
 
 class EvidenceRanker:
@@ -320,11 +321,16 @@ class EvidenceRanker:
 
         ranked_evidences = []
 
-        for result in search_results:
+        for i, result in enumerate(search_results):
             url = result.get('url', '')
-            title = result.get('name', '')
+            title = result.get('title', '') or result.get('name', '')  # 兼容两种键名
             summary = result.get('summary', '')
-            publish_date = result.get('datePublished')
+            publish_date = result.get('date_published') or result.get('datePublished')  # 兼容两种键名
+
+            # 详细日志：显示读取到的标题
+            logger.info(f"证据 [{i+1}] 标题读取: '{title[:80] if title else '(空)'}' (URL: {url[:60]})")
+            if not title:
+                logger.warning(f"⚠️ 证据 [{i+1}] 标题为空！原始数据: {list(result.keys())}")
 
             # 1. 计算相关性评分
             relevance_score = self.calculate_relevance(claim, title, summary)
