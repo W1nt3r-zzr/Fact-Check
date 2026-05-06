@@ -22,6 +22,16 @@ def _result(idx: int) -> SearchResult:
     )
 
 
+def _dunhuang_result(name: str, summary: str, date_published: str) -> SearchResult:
+    return SearchResult(
+        name=name,
+        url=f"https://example.com/{name}",
+        summary=summary,
+        date_published=date_published,
+        source="example",
+    )
+
+
 class FactCheckEvidenceLimitTests(unittest.IsolatedAsyncioTestCase):
     async def test_reasoning_and_chain_use_same_ten_core_evidences(self):
         captured = {}
@@ -72,6 +82,80 @@ class FactCheckEvidenceLimitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["chain_count"], 10)
         self.assertEqual(captured["top_k"], 10)
         self.assertEqual(response.evidence_chain["total_evidence"], 10)
+
+    async def test_core_evidence_selection_drops_stale_low_relevance_before_prompt_and_chain(self):
+        captured = {}
+
+        fresh_results = [
+            _dunhuang_result(
+                f"fresh-{idx}",
+                f"敦煌鸣沙山顶矿泉水只卖2元，景区回应称属实。第{idx}条",
+                "2026-05-01",
+            )
+            for idx in range(7)
+        ]
+        stale_low_relevance = [
+            _dunhuang_result(
+                "鸣沙山简介_鸣沙山月牙泉门票_敦煌鸣沙山游记",
+                "想去 0 去过 0 景点地址: 甘肃敦煌市南郊七公里的鸣沙山北麓。",
+                "2018-07-28",
+            ),
+            _dunhuang_result(
+                "鸣沙山简介_鸣沙山月牙泉门票_敦煌鸣沙山游记-duplicate",
+                "想去 0 去过 0 景点地址: 甘肃敦煌市南郊七公里的鸣沙山北麓。",
+                "2018-07-28",
+            ),
+            _dunhuang_result(
+                "敦煌 鸣沙山月牙泉攻略,看这一篇就够了_知乎",
+                "鸣沙山月牙泉游玩攻略，介绍路线、门票和注意事项。",
+                "2020-06-01",
+            ),
+        ]
+
+        def fake_build_prompt(claim, evidence_list):
+            captured["prompt_titles"] = [item.name for item in evidence_list]
+            return "prompt"
+
+        async def fake_generate_evidence_chain(**kwargs):
+            captured["chain_titles"] = [item["title"] for item in kwargs["search_results"]]
+            return SimpleNamespace(
+                verdict="属实",
+                confidence=90.0,
+                supporting_evidence=[],
+                opposing_evidence=[],
+                neutral_evidence=[],
+                key_findings=[],
+                total_evidence=len(kwargs["search_results"]),
+                total_search_results=10,
+                authoritative_sources=0,
+                average_score=80.0,
+                reasoning_summary="共检索到7条证据。",
+                ai_summary=None,
+            )
+
+        fact_check_router.init_dependencies(
+            llm_client=object(),
+            link_validator=None,
+            consistency_scorer=None,
+            evidence_chain_generator=SimpleNamespace(
+                generate_evidence_chain=AsyncMock(side_effect=fake_generate_evidence_chain)
+            ),
+        )
+
+        request = FactCheckRequest(claim="敦煌鸣沙山顶矿泉水只卖2元", enable_evidence_chain=True)
+
+        with patch.object(fact_check_router, "search_with_zhipu", AsyncMock(return_value=fresh_results + stale_low_relevance)), \
+             patch.object(fact_check_router, "build_llm_prompt", side_effect=fake_build_prompt), \
+             patch.object(
+                 fact_check_router,
+                 "call_llm_api",
+                 AsyncMock(return_value={"reasoning": "reasoning", "verdict": "属实"}),
+             ):
+            response = await fact_check_router.fact_check(request)
+
+        self.assertEqual(captured["prompt_titles"], [f"fresh-{idx}" for idx in range(7)])
+        self.assertEqual(captured["chain_titles"], [f"fresh-{idx}" for idx in range(7)])
+        self.assertEqual(response.evidence_chain["total_evidence"], 7)
 
     async def test_model_reasoning_evidence_count_is_normalized_to_core_evidence_count(self):
         async def fake_generate_evidence_chain(**kwargs):

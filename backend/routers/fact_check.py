@@ -13,7 +13,7 @@ from fastapi.responses import StreamingResponse
 
 from config import config, logger
 from models import FactCheckRequest, FactCheckResponse, SearchResult
-from services.search import SearchServiceError, search_with_zhipu
+from services.search import SearchServiceError, _filter_irrelevant_results, _is_time_sensitive_claim, search_with_zhipu
 from services.llm_service import build_llm_prompt, call_llm_api
 
 router = APIRouter()
@@ -58,6 +58,17 @@ def _normalize_core_evidence_count_text(text: str, core_count: int) -> str:
     )
 
 
+def _select_core_evidence(claim: str, search_results: List[SearchResult]) -> List[SearchResult]:
+    """Re-apply evidence quality gates before anything is shown to the model or UI."""
+    filtered = _filter_irrelevant_results(claim, search_results)
+    if len(filtered) < len(search_results):
+        logger.info(f"核心证据复筛：{len(search_results)} → {len(filtered)}")
+    if not filtered and not _is_time_sensitive_claim(claim):
+        logger.info("核心证据复筛无结果，非时效敏感claim回退到原始Top N")
+        return search_results[:CORE_EVIDENCE_LIMIT]
+    return filtered[:CORE_EVIDENCE_LIMIT]
+
+
 @router.post("/api/v1/check/stream")
 async def fact_check_stream(request: FactCheckRequest):
     """流式核查接口（返回Server-Sent Events）"""
@@ -77,8 +88,11 @@ async def fact_check_stream(request: FactCheckRequest):
 
             yield f"event: progress\ndata: {{\"stage\": \"found\", \"message\": \"检索到 {len(search_results)} 个相关结果，正在筛选核心证据并分析...\"}}\n\n"
 
-            # 步骤2: 构造Prompt
-            reasoning_results = search_results[:CORE_EVIDENCE_LIMIT]
+            # 步骤2: 复筛核心证据并构造Prompt
+            reasoning_results = _select_core_evidence(request.claim, search_results)
+            if not reasoning_results:
+                yield f"event: error\ndata: {{\"message\": \"未找到可用于核查的高相关近期证据\"}}\n\n"
+                return
             prompt = build_llm_prompt(request.claim, reasoning_results)
 
             # 步骤3: 流式调用LLM
@@ -209,11 +223,27 @@ async def fact_check(request: FactCheckRequest):
                 consistency_score=None
             )
 
-        # 步骤3: 链接活性检测（可选）
+        # 步骤3: 复筛核心证据，后续Prompt和证据链只使用这批证据
+        reasoning_results = _select_core_evidence(request.claim, search_results)
+        if not reasoning_results:
+            logger.warning("未找到可用于核查的高相关近期证据")
+            return FactCheckResponse(
+                verdict="信息不足，无法判断",
+                evidence_quote="无",
+                source_url="",
+                search_keywords=request.claim,
+                uncertainty_note="搜索结果未通过核心证据筛选",
+                reasoning="搜索结果缺少高相关、近期且覆盖核心要素的证据，无法进行可靠核查",
+                thinking_process=None,
+                link_validation=None,
+                consistency_score=None
+            )
+
+        # 步骤4: 链接活性检测（可选）
         link_validation_result = None
         if request.enable_link_validation:
             logger.info("开始链接活性检测...")
-            urls = [result.url for result in search_results[:5]]
+            urls = [result.url for result in reasoning_results[:5]]
             validation_results = await _link_validator.validate_multiple_links(urls, concurrent_limit=3)
             validation_report = _link_validator.generate_validation_report(validation_results)
             link_validation_result = {
@@ -231,11 +261,10 @@ async def fact_check(request: FactCheckRequest):
             }
             logger.info(f"链接验证完成: {validation_report['accessible_links']}/{validation_report['total_links']} 个链接可访问")
 
-        # 步骤4: 构造推理Prompt
-        reasoning_results = search_results[:CORE_EVIDENCE_LIMIT]
+        # 步骤5: 构造推理Prompt
         prompt = build_llm_prompt(request.claim, reasoning_results)
 
-        # 步骤5: 调用LLM进行推理
+        # 步骤6: 调用LLM进行推理
         reasoning_result = await call_llm_api(
             prompt,
             _llm_client,
@@ -247,7 +276,7 @@ async def fact_check(request: FactCheckRequest):
             len(reasoning_results)
         )
 
-        # 步骤6&7: 并行执行（一致性评分 + 证据链生成）
+        # 步骤7&8: 并行执行（一致性评分 + 证据链生成）
         consistency_result = None
         evidence_chain_result = None
         confidence_value = None
@@ -255,7 +284,7 @@ async def fact_check(request: FactCheckRequest):
         async def compute_consistency():
             if request.enable_consistency_check and reasoning_result.get("reasoning"):
                 logger.info("开始一致性评分...")
-                source_content = " ".join([result.summary for result in search_results[:3]])
+                source_content = " ".join([result.summary for result in reasoning_results[:3]])
                 consistency_score = _consistency_scorer.calculate_consistency(
                     reasoning_result["reasoning"],
                     source_content
