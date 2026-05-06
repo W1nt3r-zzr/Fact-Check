@@ -136,6 +136,37 @@ class SearchRulesTests(unittest.TestCase):
         self.assertEqual(results.items[0].date_published, "")
         self.assertEqual(results.items[0].name, "8岁伊朗男孩回到中国学校")
 
+    def test_do_search_does_not_treat_crawl_time_as_publish_date(self):
+        def build_response():
+            request = httpx.Request("POST", "https://api.bocha.cn/v1/web-search")
+            return httpx.Response(
+                200,
+                request=request,
+                json={
+                    "data": {
+                        "webPages": {
+                            "value": [
+                                {
+                                    "name": "历史页面被重新抓取",
+                                    "url": "https://example.com/old-page",
+                                    "summary": "敦煌鸣沙山顶矿泉水只卖2元，历史游客记录。",
+                                    "siteName": "测试媒体",
+                                    "datePublished": None,
+                                    "dateLastCrawled": date.today().isoformat(),
+                                }
+                            ],
+                            "totalEstimatedMatches": 1,
+                        }
+                    }
+                },
+            )
+
+        with patch("services.search.httpx.AsyncClient.post", new=AsyncMock(return_value=build_response())):
+            results = asyncio.run(_do_search("敦煌鸣沙山顶矿泉水只卖2元", None, None))
+
+        self.assertEqual(len(results.items), 1)
+        self.assertEqual(results.items[0].date_published, "")
+
     def test_recent_claim_prefers_fresher_results_when_relevance_is_similar(self):
         claim = "今天上海迪士尼临时闭园了吗"
         older = SearchResult(
@@ -291,6 +322,27 @@ class SearchRulesTests(unittest.TestCase):
         )
 
         self.assertEqual([item.name for item in filtered], [f"fresh-{idx}" for idx in range(7)])
+
+    def test_price_claim_drops_undated_results_even_if_core_terms_match(self):
+        claim = "敦煌鸣沙山顶矿泉水只卖2元"
+        undated = SearchResult(
+            name="undated",
+            url="https://example.com/undated",
+            summary="敦煌鸣沙山顶矿泉水只卖2元，历史游客记录。",
+            date_published="",
+            source="example",
+        )
+        fresh = SearchResult(
+            name="fresh",
+            url="https://example.com/fresh",
+            summary="敦煌鸣沙山顶矿泉水只卖2元，景区回应称属实。",
+            date_published=(date.today() - timedelta(days=7)).isoformat(),
+            source="example",
+        )
+
+        filtered = _filter_irrelevant_results(claim, [undated, fresh], min_relevance=0.2)
+
+        self.assertEqual([item.name for item in filtered], ["fresh"])
 
 
 if __name__ == "__main__":

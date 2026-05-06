@@ -467,7 +467,7 @@ def _is_stale_for_recent_claim(claim: str, result: SearchResult) -> bool:
         return False
     age_days = _age_days(result.date_published)
     if age_days is None:
-        return False
+        return is_time_sensitive
     stale_window_days = 45
     return age_days > stale_window_days
 
@@ -607,8 +607,9 @@ async def _do_search(
             # 优先summary（AI摘要），降级snippet（简短描述）
             summary = _as_text(item.get("summary") or item.get("snippet"))
 
-            # 发布时间：优先datePublished
-            date_pub = _as_text(item.get("datePublished") or item.get("dateLastCrawled"))
+            # 只使用真实发布时间。dateLastCrawled 是搜索引擎爬取时间，
+            # 不能代表文章发布时间，否则旧内容会被误判为近期证据。
+            date_pub = _as_text(item.get("datePublished"))
             # 清理时区格式
             if date_pub:
                 date_pub = re.sub(r'[T ].*$', '', date_pub)
