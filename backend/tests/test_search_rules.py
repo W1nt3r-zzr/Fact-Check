@@ -1,6 +1,7 @@
 import asyncio
 import sys
 import unittest
+from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -257,6 +258,39 @@ class SearchRulesTests(unittest.TestCase):
         )
 
         self.assertEqual([item.name for item in filtered], ["fresh relevant"])
+
+    def test_price_claim_does_not_backfill_with_historical_results_to_reach_target_count(self):
+        claim = "敦煌鸣沙山顶矿泉水只卖2元"
+        fresh_date = (date.today() - timedelta(days=7)).isoformat()
+        historical_date = (date.today() - timedelta(days=70)).isoformat()
+        fresh_results = [
+            SearchResult(
+                name=f"fresh-{idx}",
+                url=f"https://example.com/fresh-{idx}",
+                summary=f"敦煌鸣沙山顶矿泉水只卖2元，景区回应称属实。第{idx}条",
+                date_published=fresh_date,
+                source="example",
+            )
+            for idx in range(7)
+        ]
+        historical_results = [
+            SearchResult(
+                name=f"historical-{idx}",
+                url=f"https://example.com/historical-{idx}",
+                summary=f"敦煌鸣沙山顶矿泉水只卖2元，历史游客记录。第{idx}条",
+                date_published=historical_date,
+                source="example",
+            )
+            for idx in range(3)
+        ]
+
+        filtered = _filter_irrelevant_results(
+            claim,
+            fresh_results + historical_results,
+            min_relevance=0.2,
+        )
+
+        self.assertEqual([item.name for item in filtered], [f"fresh-{idx}" for idx in range(7)])
 
 
 if __name__ == "__main__":

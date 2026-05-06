@@ -459,8 +459,7 @@ def _age_days(date_published: str) -> Optional[int]:
 def _is_stale_for_recent_claim(claim: str, result: SearchResult) -> bool:
     """
     对明显近期性、事件类或价格状态类claim，超过时间窗口的旧新闻直接降级处理。
-    显式近期/事件类使用45天窗口；价格、售卖状态类使用180天窗口，
-    避免把历史相似报道混进当前状态核查里。
+    这些claim核查的是当前状态，统一使用45天窗口，避免把历史相似报道混进核心证据里。
     """
     is_event_or_explicit_recent = _is_recent_claim_without_event(claim) or _is_event_claim(claim)
     is_time_sensitive = _is_time_sensitive_claim(claim)
@@ -469,7 +468,7 @@ def _is_stale_for_recent_claim(claim: str, result: SearchResult) -> bool:
     age_days = _age_days(result.date_published)
     if age_days is None:
         return False
-    stale_window_days = 45 if is_event_or_explicit_recent else 180
+    stale_window_days = 45
     return age_days > stale_window_days
 
 
@@ -479,6 +478,7 @@ def _filter_irrelevant_results(claim: str, results: List[SearchResult], min_rele
         return results
 
     recent_claim = _is_recent_claim(claim)
+    time_sensitive_claim = _is_time_sensitive_claim(claim)
     scored = []
     for r in results:
         if not _has_time_sensitive_core_coverage(claim, r):
@@ -497,7 +497,7 @@ def _filter_irrelevant_results(claim: str, results: List[SearchResult], min_rele
         r for r, relevance, freshness, total_score, stale_for_recent in scored
         if relevance >= min_relevance and not stale_for_recent
     ]
-    if len(filtered) < 8:
+    if not time_sensitive_claim and len(filtered) < 8:
         # 从剩余结果中补充，但排除得分接近0的完全无关结果
         for r, relevance, freshness, total_score, stale_for_recent in scored:
             if stale_for_recent:
@@ -508,7 +508,7 @@ def _filter_irrelevant_results(claim: str, results: List[SearchResult], min_rele
                 break
 
     # 如果全是旧新闻，仍保留最相关的少量结果，避免完全无证据可用
-    if not filtered and recent_claim:
+    if not filtered and recent_claim and not time_sensitive_claim:
         for r, relevance, freshness, total_score, stale_for_recent in scored:
             if relevance >= min_relevance:
                 filtered.append(r)
