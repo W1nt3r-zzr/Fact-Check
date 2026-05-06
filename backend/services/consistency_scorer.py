@@ -9,6 +9,8 @@ from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from datetime import datetime
 
+from utils.text import STOP_WORDS, extract_keywords_with_freq
+
 logger = logging.getLogger(__name__)
 
 
@@ -35,18 +37,7 @@ class ConsistencyScorer:
 
     def __init__(self):
         """初始化一致性评分器"""
-        self.stopwords = self._load_chinese_stopwords()
-
-    def _load_chinese_stopwords(self) -> set:
-        """加载中文停用词"""
-        stopwords = {
-            "的", "了", "在", "是", "我", "有", "和", "就", "不", "人",
-            "都", "一", "一个", "上", "也", "很", "到", "说", "要", "去",
-            "你", "会", "着", "没有", "看", "好", "自己", "这", "那", "里",
-            "为", "与", "或", "及", "等", "对", "将", "把", "被", "从",
-            "以", "于", "而", "之", "其", "它", "此", "中", "内", "外"
-        }
-        return stopwords
+        pass
 
     def _preprocess_text(self, text: str) -> str:
         """
@@ -84,7 +75,7 @@ class ConsistencyScorer:
         words = re.findall(r'[\u4e00-\u9fa5]{2,}', text)
 
         # 过滤停用词
-        words = [w for w in words if w not in self.stopwords and len(w) >= 2]
+        words = [w for w in words if w not in STOP_WORDS and len(w) >= 2]
 
         # 统计词频
         word_freq = {}
@@ -108,8 +99,8 @@ class ConsistencyScorer:
         Returns:
             float: 相似度 (0-1)
         """
-        keywords1 = set(self._extract_keywords(text1, top_n=50))
-        keywords2 = set(self._extract_keywords(text2, top_n=50))
+        keywords1 = set(extract_keywords_with_freq(text1, top_n=50))
+        keywords2 = set(extract_keywords_with_freq(text2, top_n=50))
 
         if not keywords1 or not keywords2:
             return 0.0
@@ -130,8 +121,8 @@ class ConsistencyScorer:
         Returns:
             Tuple[float, float]: (text1在text2中的覆盖比例, text2在text1中的覆盖比例)
         """
-        words1 = set(self._extract_keywords(text1, top_n=100))
-        words2 = set(self._extract_keywords(text2, top_n=100))
+        words1 = set(extract_keywords_with_freq(text1, top_n=100))
+        words2 = set(extract_keywords_with_freq(text2, top_n=100))
 
         if not words1 or not words2:
             return 0.0, 0.0
@@ -224,8 +215,8 @@ class ConsistencyScorer:
             Tuple[float, List[str]]: (完整性分数, 缺失信息列表)
         """
         # 提取源内容的关键信息
-        source_keywords = self._extract_keywords(source_content, top_n=30)
-        ai_keywords = self._extract_keywords(ai_summary, top_n=30)
+        source_keywords = extract_keywords_with_freq(source_content, top_n=30)
+        ai_keywords = extract_keywords_with_freq(ai_summary, top_n=30)
 
         # 找出AI遗漏的关键信息
         missing_keywords = []
@@ -416,51 +407,3 @@ class ConsistencyScorer:
                 return "AI生成内容与源内容一致性较低，建议人工核实后再使用。"
 
 
-# 使用示例和测试
-def main():
-    """测试一致性评分功能"""
-    scorer = ConsistencyScorer()
-
-    # 测试案例1：高度一致
-    ai_summary1 = "北京是中国的首都，位于华北地区，人口约2100万。"
-    source_content1 = "北京，简称京，是中华人民共和国的首都，位于华北地区，人口约2100万。"
-
-    score1 = scorer.calculate_consistency(ai_summary1, source_content1)
-    report1 = scorer.generate_consistency_report(score1)
-
-    print("=== 测试案例1：高度一致 ===")
-    print(f"总体评分: {score1.overall_score}")
-    print(f"一致性等级: {report1['consistency_level']}")
-    print(f"建议: {report1['recommendation']}")
-    print()
-
-    # 测试案例2：存在差异
-    ai_summary2 = "GPT-4模型参数量达到1万亿，训练成本约1亿美元。"
-    source_content2 = "GPT-4模型的具体参数量未公开，外界估计在千亿级别，训练成本未知。"
-
-    score2 = scorer.calculate_consistency(ai_summary2, source_content2)
-    report2 = scorer.generate_consistency_report(score2)
-
-    print("=== 测试案例2：存在差异 ===")
-    print(f"总体评分: {score2.overall_score}")
-    print(f"一致性等级: {report2['consistency_level']}")
-    print(f"关键差异: {score2.key_differences}")
-    print(f"建议: {report2['recommendation']}")
-    print()
-
-    # 测试案例3：矛盾信息
-    ai_summary3 = "中国的首都是上海，位于华东地区。"
-    source_content3 = "北京是中华人民共和国的首都，上海是最大的城市。"
-
-    score3 = scorer.calculate_consistency(ai_summary3, source_content3)
-    report3 = scorer.generate_consistency_report(score3)
-
-    print("=== 测试案例3：矛盾信息 ===")
-    print(f"总体评分: {score3.overall_score}")
-    print(f"一致性等级: {report3['consistency_level']}")
-    print(f"矛盾信息: {score3.contradictory_info}")
-    print(f"建议: {report3['recommendation']}")
-
-
-if __name__ == "__main__":
-    main()

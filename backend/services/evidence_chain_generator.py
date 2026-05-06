@@ -8,9 +8,19 @@ import re
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, asdict, field
 from datetime import datetime
+from urllib.parse import urlparse
 
 from services.evidence_ranker import EvidenceRanker, RankedEvidence
 from services.link_validator import LinkValidator, LinkValidationResult
+from utils.text import STOP_WORDS, extract_keywords
+
+# Optional jieba import with graceful fallback
+try:
+    import jieba
+    _JIEBA_AVAILABLE = True
+except ImportError:
+    jieba = None
+    _JIEBA_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +57,7 @@ class EvidenceChainItem:
 
     # 立场
     stance: str = "neutral"  # 证据立场: support/oppose/neutral
+    analysis: str = ""  # AI分析：该证据如何支持/反驳说法（从推理文本中提取）
 
     # 验证
     link_status: Optional[str] = None  # 链接状态
@@ -75,6 +86,7 @@ class EvidenceChain:
 
     # 统计
     total_evidence: int  # 总证据数
+    total_search_results: int  # 搜索返回的总结果数
     authoritative_sources: int  # 权威来源数
     average_score: float  # 平均评分
 
@@ -89,11 +101,12 @@ class EvidenceChain:
 class EvidenceChainGenerator:
     """证据链生成器"""
 
-    def __init__(self, glm_client=None):
+    def __init__(self, glm_client=None, model_name="glm-5.1"):
         """初始化证据链生成器"""
         self.ranker = EvidenceRanker()
         self.link_validator = LinkValidator(timeout=5.0)
-        self.glm_client = glm_client  # GLM客户端，用于立场检测
+        self.glm_client = glm_client
+        self.model_name = model_name
 
     async def generate_evidence_chain(
         self,
@@ -101,7 +114,8 @@ class EvidenceChainGenerator:
         search_results: List[Dict[str, str]],
         enable_link_validation: bool = False,
         top_k: int = 5,
-        reasoning_text: Optional[str] = None
+        reasoning_text: Optional[str] = None,
+        total_search_results: int = 0
     ) -> EvidenceChain:
         """
         生成证据链
@@ -111,7 +125,7 @@ class EvidenceChainGenerator:
             search_results: 搜索结果列表
             enable_link_validation: 是否验证链接活性
             top_k: 返回Top K个证据
-            reasoning_text: GLM-5推理文本（可选，用于提取证据立场）
+            reasoning_text: LLM推理文本（可选，用于提取证据立场）
 
         Returns:
             EvidenceChain: 结构化的证据链
@@ -123,6 +137,9 @@ class EvidenceChainGenerator:
 
         # 步骤1: 证据排序
         ranked_evidences = self.ranker.rank_evidences(claim, search_results)
+
+        # 步骤1.5: 去重（URL相同或同一域名下标题高度相似）
+        ranked_evidences = self._deduplicate_evidences(ranked_evidences)
 
         # 步骤2: 链接验证（可选）
         link_validations = {}
@@ -139,10 +156,15 @@ class EvidenceChainGenerator:
         # 步骤3: 提取Top K证据
         top_evidences = ranked_evidences[:top_k]
 
-        # 步骤3.5: 从推理文本中提取证据立场（如果提供了推理文本）
+        # 步骤3.5: 从推理文本中提取证据立场和分析（如果提供了推理文本）
+        stance_map = {}
+        analysis_map = {}
         if reasoning_text:
             logger.info("从推理文本中提取证据立场...")
             stance_map = self._extract_stances_from_reasoning(reasoning_text, top_evidences)
+
+            # 同时提取每条证据的分析内容
+            analysis_map = self._extract_evidence_analysis_from_reasoning(reasoning_text, top_evidences)
 
             # 将提取的立场赋值给证据
             for evidence in top_evidences:
@@ -181,7 +203,8 @@ class EvidenceChainGenerator:
                 freshness_score=evidence.freshness_score,
                 stance=evidence.stance,  # 添加立场字段
                 summary=evidence.summary[:200],  # 限制摘要长度
-                key_quote=self._extract_key_quote(evidence.summary),
+                key_quote=self._extract_key_quote(evidence.summary, highlights),
+                analysis=analysis_map.get(evidence.url, ""),
                 highlights=highlights,
                 link_status=link_status,
                 publish_date=evidence.publish_date,
@@ -208,8 +231,12 @@ class EvidenceChainGenerator:
         # 步骤10: 不确定性说明
         uncertainty_note = self._generate_uncertainty_note(chain_items)
 
-        # 步骤11: AI归纳总结（与普通搜索引擎的核心区别）
-        ai_summary = await self._generate_ai_summary(claim, chain_items, verdict)
+        # 步骤11: AI归纳总结（优先从推理结果提取，避免第二次LLM调用）
+        ai_summary = None
+        if reasoning_text:
+            ai_summary = self._extract_ai_summary_from_reasoning(reasoning_text)
+        if not ai_summary:
+            ai_summary = await self._generate_ai_summary(claim, chain_items, verdict)
 
         processing_time = (datetime.now() - start_time).total_seconds() * 1000
 
@@ -226,6 +253,7 @@ class EvidenceChainGenerator:
             uncertainty_note=uncertainty_note,
             ai_summary=ai_summary,  # 添加AI归纳总结
             total_evidence=len(chain_items),
+            total_search_results=total_search_results or len(search_results),
             authoritative_sources=authoritative_count,
             average_score=round(avg_score, 2),
             generated_at=datetime.now().isoformat(),
@@ -235,6 +263,52 @@ class EvidenceChainGenerator:
         logger.info(f"证据链生成完成: {len(chain_items)} 个证据, 耗时: {processing_time:.0}ms")
 
         return evidence_chain
+
+    def _deduplicate_evidences(
+        self,
+        evidences: List[RankedEvidence]
+    ) -> List[RankedEvidence]:
+        """
+        对排序后的证据进行去重，保留排名最高的。
+
+        去重维度：
+        1. URL 完全相同（去掉查询参数和锚点）
+        2. 同一域名下标题高度相似（互相包含且长度>=10）
+        """
+        seen_urls: set[str] = set()
+        seen_domain_titles: dict[str, set[str]] = {}
+        result: List[RankedEvidence] = []
+
+        for ev in evidences:
+            # 1. URL 去重：去掉查询参数和锚点，统一大小写
+            parsed = urlparse(ev.url)
+            url_normalized = (parsed.scheme + "://" + parsed.netloc + parsed.path).rstrip("/").lower()
+            if url_normalized in seen_urls:
+                logger.info(f"去重：跳过URL重复证据「{ev.title[:50]}...」")
+                continue
+            seen_urls.add(url_normalized)
+
+            # 2. 同一域名下标题相似去重
+            domain = ev.domain.lower()
+            title_lower = ev.title.lower().strip()
+            if domain not in seen_domain_titles:
+                seen_domain_titles[domain] = set()
+
+            is_duplicate = False
+            for kept_title in seen_domain_titles[domain]:
+                # 互相包含且长度都>=10视为重复
+                if (title_lower in kept_title or kept_title in title_lower) and len(title_lower) >= 10 and len(kept_title) >= 10:
+                    logger.info(f"去重：跳过标题相似证据「{ev.title[:50]}...」")
+                    is_duplicate = True
+                    break
+            if is_duplicate:
+                continue
+            seen_domain_titles[domain].add(title_lower)
+            result.append(ev)
+
+        if len(result) < len(evidences):
+            logger.info(f"证据去重：{len(evidences)} -> {len(result)}")
+        return result
 
     def _categorize_evidences(
         self,
@@ -309,49 +383,268 @@ class EvidenceChainGenerator:
         Returns:
             List[EvidenceHighlight]: 高亮信息列表
         """
-        highlights = []
         summary = evidence.summary
 
-        # 提取claim中的关键词并在summary中查找
+        highlight_type = self._get_highlight_type(evidence.stance)
+        candidates = self._extract_highlight_candidates(claim)
+        matches = self._find_candidate_matches(summary, candidates)
+        if not matches:
+            return []
+
+        selected_spans = self._select_assertion_spans(summary, matches, claim, max_spans=2)
+        if not selected_spans:
+            return []
+
+        return [
+            EvidenceHighlight(
+                text=summary[start_idx:end_idx],
+                start_index=start_idx,
+                end_index=end_idx,
+                highlight_type=highlight_type,
+                confidence=evidence.overall_score / 100
+            )
+            for start_idx, end_idx in selected_spans
+        ]
+
+    def _select_assertion_spans(
+        self,
+        summary: str,
+        matches: List[tuple[int, int, str]],
+        claim: str,
+        max_spans: int = 2
+    ) -> List[tuple[int, int]]:
+        sentence_candidates = self._score_candidate_sentences(summary, matches, claim)
+        if not sentence_candidates:
+            return []
+
+        ranked = sorted(
+            sentence_candidates.items(),
+            key=lambda item: (
+                item[1]["score"],
+                item[1]["hits"],
+                item[1]["coverage"],
+                -(item[0][1] - item[0][0]),
+                -item[0][0],
+            ),
+            reverse=True
+        )
+
+        best_score = ranked[0][1]["score"]
+        min_score = max(8, best_score * 0.65)
+        selected = []
+
+        for span, data in ranked:
+            if len(selected) >= max_spans:
+                break
+            if data["score"] < min_score:
+                continue
+            if self._is_overlapping_range(span[0], span[1], selected):
+                continue
+            selected.append(span)
+
+        return sorted(selected, key=lambda item: item[0])
+
+    def _score_candidate_sentences(
+        self,
+        summary: str,
+        matches: List[tuple[int, int, str]],
+        claim: str
+    ) -> Dict[tuple[int, int], Dict[str, Any]]:
+        sentence_candidates = {}
         claim_keywords = self._extract_keywords_from_claim(claim)
 
-        for keyword in claim_keywords:
-            if keyword in summary:
-                # 找到关键词在summary中的位置
-                start_idx = summary.find(keyword)
-                if start_idx != -1:
-                    end_idx = start_idx + len(keyword)
+        for start_idx, end_idx, candidate in matches:
+            sentence_start, sentence_end = self._find_sentence_boundaries(summary, start_idx, end_idx)
+            key = (sentence_start, sentence_end)
+            if key not in sentence_candidates:
+                sentence_candidates[key] = {
+                    "hits": 0,
+                    "coverage": 0,
+                    "candidates": set(),
+                    "text": summary[sentence_start:sentence_end],
+                }
+            sentence_candidates[key]["hits"] += 1
+            sentence_candidates[key]["coverage"] += end_idx - start_idx
+            sentence_candidates[key]["candidates"].add(candidate)
 
-                    # 确定高亮类型（使用立场字段而不是overall_score）
-                    if evidence.stance == "support":
-                        highlight_type = "support"
-                    elif evidence.stance == "oppose":
-                        highlight_type = "oppose"
-                    else:
-                        highlight_type = "neutral"
+        for data in sentence_candidates.values():
+            data["score"] = self._score_assertion_sentence(
+                data["text"],
+                data["candidates"],
+                claim_keywords,
+            )
 
-                    highlight = EvidenceHighlight(
-                        text=keyword,
-                        start_index=start_idx,
-                        end_index=end_idx,
-                        highlight_type=highlight_type,
-                        confidence=evidence.overall_score / 100
-                    )
-                    highlights.append(highlight)
+        return sentence_candidates
 
-        return highlights
+    def _select_best_assertion_span(
+        self,
+        summary: str,
+        matches: List[tuple[int, int, str]],
+        claim: str
+    ) -> Optional[tuple[int, int]]:
+        spans = self._select_assertion_spans(summary, matches, claim, max_spans=1)
+        return spans[0] if spans else None
 
     def _extract_keywords_from_claim(self, claim: str) -> List[str]:
-        """从说法中提取关键词"""
-        import jieba
-        words = jieba.cut(claim)
-        # 过滤停用词和短词
-        keywords = [w for w in words if len(w) >= 2]
-        return list(set(keywords))[:10]  # 返回前10个关键词
+        """从说法中提取关键词。优先使用 jieba 分词，不可用时降级到正则提取。"""
+        if _JIEBA_AVAILABLE and jieba is not None:
+            words = jieba.cut(claim)
+            keywords = [w for w in words if len(w) >= 2 and w not in STOP_WORDS]
+            return list(set(keywords))[:10]
+        return extract_keywords(claim, top_n=10)
 
-    def _extract_key_quote(self, summary: str) -> str:
+    def _extract_highlight_candidates(self, claim: str) -> List[str]:
+        """提取适合在摘要中高亮的候选片段。"""
+        candidates = []
+        seen = set()
+
+        def add_candidate(value: str):
+            value = value.strip(" ，。；：、()（）[]【】\"'")
+            if len(value) < 2 or value in seen:
+                return
+            seen.add(value)
+            candidates.append(value)
+
+        url_pattern = re.compile(r"https?://[^\s，。；、】【\"'<>]+")
+        host_port_pattern = re.compile(r"(?:localhost|\d{1,3}(?:\.\d{1,3}){3}):\d{2,5}")
+        path_pattern = re.compile(r"/api(?:/[A-Za-z0-9._-]+)+")
+
+        for match in url_pattern.findall(claim):
+            add_candidate(match)
+
+        for match in host_port_pattern.findall(claim):
+            add_candidate(match)
+
+        for match in path_pattern.findall(claim):
+            add_candidate(match)
+
+        for keyword in sorted(self._extract_keywords_from_claim(claim), key=len, reverse=True):
+            add_candidate(keyword)
+
+        return sorted(candidates, key=len, reverse=True)
+
+    def _get_highlight_type(self, stance: str) -> str:
+        if stance == "support":
+            return "support"
+        if stance == "oppose":
+            return "oppose"
+        return "neutral"
+
+    def _find_candidate_matches(
+        self,
+        summary: str,
+        candidates: List[str]
+    ) -> List[tuple[int, int, str]]:
+        matches = []
+        used_ranges = []
+
+        for candidate in candidates:
+            start_pos = 0
+            while True:
+                start_idx = summary.find(candidate, start_pos)
+                if start_idx == -1:
+                    break
+
+                end_idx = start_idx + len(candidate)
+                if self._is_overlapping_range(start_idx, end_idx, used_ranges):
+                    start_pos = start_idx + 1
+                    continue
+
+                matches.append((start_idx, end_idx, candidate))
+                used_ranges.append((start_idx, end_idx))
+                start_pos = end_idx
+
+        return sorted(matches, key=lambda item: (item[0], -(item[1] - item[0])))
+
+    def _find_sentence_boundaries(
+        self,
+        text: str,
+        start_idx: int,
+        end_idx: int
+    ) -> tuple[int, int]:
+        sentence_delimiters = "。！？；!?\n"
+
+        sentence_start = 0
+        for idx in range(start_idx - 1, -1, -1):
+            if text[idx] in sentence_delimiters:
+                sentence_start = idx + 1
+                break
+
+        sentence_end = len(text)
+        for idx in range(end_idx, len(text)):
+            if text[idx] in sentence_delimiters:
+                sentence_end = idx + 1
+                break
+
+        while sentence_start < sentence_end and text[sentence_start].isspace():
+            sentence_start += 1
+        while sentence_end > sentence_start and text[sentence_end - 1].isspace():
+            sentence_end -= 1
+
+        return sentence_start, sentence_end
+
+    def _score_assertion_sentence(
+        self,
+        sentence: str,
+        candidates: set[str],
+        claim_keywords: List[str]
+    ) -> float:
+        score = sum(len(candidate) for candidate in candidates)
+
+        source_cues = [
+            "数据显示", "通报", "公告", "研究显示", "抽检结果显示",
+            "证实", "表明", "指出", "发布", "回应", "报告显示"
+        ]
+        negation_cues = [
+            "不存在", "未检出", "未发现", "并非", "不是", "不足以证明",
+            "不能证明", "尚无证据", "没有证据", "无证据表明"
+        ]
+        fact_cues = [
+            "新增", "下降", "上升", "确诊", "检出", "达到", "转运",
+            "处罚", "显示", "证据", "结果", "病例", "环比", "同比"
+        ]
+        rumor_cues = [
+            "网传", "传言", "说法", "传播", "热议", "讨论",
+            "社交平台", "网友", "引发关注", "话题"
+        ]
+
+        score += sum(8 for cue in source_cues if cue in sentence)
+        score += sum(7 for cue in negation_cues if cue in sentence)
+        score += sum(4 for cue in fact_cues if cue in sentence)
+        score += sum(3 for keyword in claim_keywords if keyword in sentence)
+
+        if re.search(r'\d+(?:\.\d+)?[%％例年月日天家次项名万亿千百]', sentence):
+            score += 6
+        elif re.search(r'\d+(?:\.\d+)?', sentence):
+            score += 3
+
+        if re.search(r'(国家统计局|卫健委|市场监管|医院|研究|法院|警方|教育局|政府)', sentence):
+            score += 6
+
+        rumor_penalty = sum(6 for cue in rumor_cues if cue in sentence)
+        if rumor_penalty:
+            score -= rumor_penalty
+            if not any(cue in sentence for cue in source_cues + negation_cues):
+                score -= 6
+
+        return score
+
+    def _is_overlapping_range(
+        self,
+        start_idx: int,
+        end_idx: int,
+        used_ranges: List[tuple[int, int]]
+    ) -> bool:
+        return any(start_idx < used_end and end_idx > used_start for used_start, used_end in used_ranges)
+
+    def _extract_key_quote(
+        self,
+        summary: str,
+        highlights: Optional[List[EvidenceHighlight]] = None
+    ) -> str:
         """从摘要中提取关键引用"""
-        # 简单实现：返回摘要的前150个字符
+        if highlights:
+            return highlights[0].text[:150]
         return summary[:150] if summary else "无"
 
     def _generate_tags(self, evidence: RankedEvidence) -> List[str]:
@@ -398,11 +691,14 @@ class EvidenceChainGenerator:
             },
             "content": {
                 "summary": evidence.summary,
-                "key_quote": evidence.key_quote
+                "key_quote": evidence.key_quote,
+                "analysis": evidence.analysis
             },
             "highlights": [
                 {
                     "text": h.text,
+                    "start_index": h.start_index,
+                    "end_index": h.end_index,
                     "type": h.highlight_type,
                     "confidence": h.confidence
                 }
@@ -416,39 +712,51 @@ class EvidenceChainGenerator:
         }
 
     def _generate_reasoning_summary(self, claim: str, evidences: List[EvidenceChainItem]) -> str:
-        """生成推理过程摘要（基于立场而非评分）"""
+        """生成推理过程摘要：聚焦证据质量、来源分布与分析方法（不重复结论）"""
         if not evidences:
             return f"未找到关于「{claim}」的有效证据。"
 
-        # 统计各立场证据数量
-        supporting_count = sum(1 for e in evidences if e.stance == "support")
-        opposing_count = sum(1 for e in evidences if e.stance == "oppose")
-        neutral_count = sum(1 for e in evidences if e.stance == "neutral")
+        total = len(evidences)
+        # 来源等级分布
+        tier1 = sum(1 for e in evidences if e.tier == "Tier 1")
+        tier2 = sum(1 for e in evidences if e.tier == "Tier 2")
+        tier3 = total - tier1 - tier2
 
-        # 统计权威来源
-        authoritative_count = sum(1 for e in evidences if e.tier == "Tier 1")
+        # 独立来源域名数
+        unique_domains = len(set(e.domain for e in evidences))
 
-        summary = f"基于{len(evidences)}条证据进行分析，"
+        # 时效性
+        avg_freshness = sum(e.freshness_score for e in evidences) / total if total else 0
 
-        # 根据立场分布判断
-        if supporting_count > opposing_count * 2:
-            summary += f"绝大多数证据（{supporting_count}条）支持该说法，仅{opposing_count}条反对。"
-        elif opposing_count > supporting_count * 2:
-            summary += f"绝大多数证据（{opposing_count}条）反对该说法，仅{supporting_count}条支持。"
-        elif supporting_count > opposing_count:
-            summary += f"多数证据支持该说法（{supporting_count}条支持 vs {opposing_count}条反对）。"
-        elif opposing_count > supporting_count:
-            summary += f"多数证据反对该说法（{opposing_count}条反对 vs {supporting_count}条支持）。"
+        # 平均证据质量
+        avg_score = sum(e.overall_score for e in evidences) / total if total else 0
+
+        summary = f"共检索到{total}条证据，来自{unique_domains}个不同来源。"
+
+        # 来源质量分析
+        source_parts = []
+        if tier1 > 0:
+            source_parts.append(f"{tier1}条来自官方/权威渠道")
+        if tier2 > 0:
+            source_parts.append(f"{tier2}条来自主流媒体")
+        if tier3 > 0:
+            source_parts.append(f"{tier3}条来自其他网络来源")
+        if source_parts:
+            summary += " 其中" + "，".join(source_parts) + "。"
+
+        # 时效性评估
+        if avg_freshness >= 70:
+            summary += " 证据整体时效性良好，多数为近期信息。"
+        elif avg_freshness >= 40:
+            summary += " 证据时效性一般，部分信息可能已过时。"
         else:
-            summary += f"支持与反对证据数量相当（各{supporting_count}条），存在争议。"
+            summary += " 证据时效性偏低，需注意信息的适用性。"
 
-        # 中性证据
-        if neutral_count > 0:
-            summary += f" 另有{neutral_count}条中立证据提供背景信息。"
-
-        # 权威来源
-        if authoritative_count > 0:
-            summary += f" 其中包含{authoritative_count}个权威来源。"
+        # 证据质量评估
+        if avg_score >= 70:
+            summary += " 综合评估证据质量较高，来源可信度较好。"
+        elif avg_score >= 50:
+            summary += " 综合评估证据质量中等，建议结合更多来源验证。"
 
         return summary
 
@@ -564,7 +872,7 @@ class EvidenceChainGenerator:
         verdict: str
     ) -> str:
         """
-        使用GLM-5生成AI归纳总结（与普通搜索引擎的核心区别）
+        使用LLM生成AI归纳总结（与普通搜索引擎的核心区别）
 
         Args:
             claim: 待核查的说法
@@ -575,7 +883,7 @@ class EvidenceChainGenerator:
             str: AI归纳总结文本
         """
         if not self.glm_client:
-            logger.warning("GLM客户端未初始化，跳过AI归纳总结")
+            logger.warning("LLM客户端未初始化，跳过AI归纳总结")
             return None
 
         try:
@@ -618,27 +926,80 @@ class EvidenceChainGenerator:
 
 **重要要求**：
 - 直接输出归纳总结内容，不要重复上述问题或标题
-- 开头先用1-2句话概括核心结论（作为简短摘要）
+- 开头先用1-2句话概括核心结论（作为简短摘要），必须是自然语言段落，不要出现"核心事实提取""洞察分析"等分节标题
 - 然后详细展开分析
 - 语言简洁专业，避免重复
 - 突出AI的归纳分析能力，而非简单罗列证据
 - 使用项目符号（•）列出要点
+- 每个项目符号必须单独占一行，禁止把两个项目符号写在同一行
 
 请直接开始输出归纳总结："""
 
-            logger.info("开始调用GLM-5生成AI归纳总结...")
+            logger.info("开始调用LLM生成AI归纳总结...")
 
-            # 调用GLM-5
-            response = self.glm_client.chat.completions.create(
-                model="glm-5",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
-                max_tokens=2000  # 增加到2000以避免内容被截断
-            )
+            # 🔥 自动重试机制：检测截断并自动增加max_tokens
+            # v0.5.2 优化：从1500提升到3000，避免复杂说法触发重试（节省~2分钟）
+            max_attempts = 3  # 最多重试3次
+            base_max_tokens = 3000  # 初始max_tokens（提升以避免复杂说法的重试开销）
+            response = None
+            actual_max_tokens = base_max_tokens
+            attempt_count = 0  # 记录实际尝试次数
+
+            for attempt in range(max_attempts):
+                attempt_count = attempt + 1
+                logger.info(f"🔄 尝试 {attempt_count}/{max_attempts}，max_tokens={actual_max_tokens}")
+
+                response = self.glm_client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.7,
+                    max_tokens=actual_max_tokens
+                )
+
+                # 🔍 检测是否被截断
+                if hasattr(response, 'choices') and len(response.choices) > 0:
+                    choice = response.choices[0]
+                    finish_reason = getattr(choice, 'finish_reason', None)
+                    content = getattr(choice.message, 'content', '')
+
+                    logger.info(f"📊 finish_reason: {finish_reason}, content长度: {len(content) if content else 0}")
+
+                    # 检查是否被截断
+                    is_truncated = (
+                        finish_reason == 'length' or  # 达到token上限
+                        (content and len(content) > 100 and not content[-1] in '。！？.!?，,、')  # 内容没有结束标点
+                    )
+
+                    if is_truncated and attempt < max_attempts - 1:
+                        # 截断了，增加max_tokens重试
+                        old_tokens = actual_max_tokens
+                        actual_max_tokens += 500  # 每次增加500 tokens
+                        logger.warning(f"⚠️ 内容被截断，增加max_tokens: {old_tokens} → {actual_max_tokens}")
+                        continue
+                    elif is_truncated:
+                        # 最后一次尝试仍然截断，记录警告但继续处理
+                        logger.error(f"❌ 内容仍然被截断（max_tokens={actual_max_tokens}），将使用不完整内容")
+                        break
+                    else:
+                        # 内容完整，退出循环
+                        logger.info(f"✅ 内容完整生成（finish_reason={finish_reason}）")
+                        break
+                else:
+                    logger.error("❌ 响应格式异常，无法检测截断")
+                    break
+
 
             # 🔍 详细调试日志：检查完整响应结构
-            logger.info(f"📦 GLM-5响应类型: {type(response)}")
-            logger.info(f"📦 GLM-5响应对象: {response}")
+            logger.info(f"📦 LLM响应类型: {type(response)}")
+
+            # 🔍 监控日志：记录实际 token 使用
+            if hasattr(response, 'usage'):
+                usage = response.usage
+                logger.info(f"📊 Token使用监控: {usage.completion_tokens} tokens (上限{actual_max_tokens}), "
+                           f"prompt_tokens: {usage.prompt_tokens}, "
+                           f"total_tokens: {usage.total_tokens}")
+            else:
+                logger.warning("⚠️ 响应中没有 usage 字段，无法记录 token 使用情况")
 
             # 检查choices字段
             if hasattr(response, 'choices'):
@@ -730,10 +1091,19 @@ class EvidenceChainGenerator:
             brief_summary = self._extract_brief_summary(full_summary)
             logger.info(f"📝 简短摘要: {brief_summary}")
 
-            # 返回字典结构（包含完整总结和简短摘要）
+            # 🔥 v0.5.2 记录重试信息（用于前端透明反馈）
+            retry_info = {
+                "attempts": attempt_count,
+                "final_max_tokens": actual_max_tokens,
+                "base_max_tokens": base_max_tokens
+            }
+            logger.info(f"📊 重试信息: {attempt_count}次尝试, 最终max_tokens={actual_max_tokens}")
+
+            # 返回字典结构（包含完整总结、简短摘要、重试信息）
             result = {
                 "full": full_summary,
-                "brief": brief_summary
+                "brief": brief_summary,
+                "retry_info": retry_info  # v0.5.2 新增：用于前端显示透明反馈
             }
 
             logger.info(f"AI归纳总结生成完成，完整长度: {len(full_summary)} 字符，简短长度: {len(brief_summary)} 字符")
@@ -744,63 +1114,166 @@ class EvidenceChainGenerator:
             logger.error(f"AI归纳总结生成失败: {e}")
             return None
 
+    def _extract_ai_summary_from_reasoning(self, reasoning_text: str):
+        """从第一次LLM推理结果中提取归纳总结（避免第二次LLM调用）"""
+        if not reasoning_text:
+            return None
+
+        # 匹配 ### 5. 归纳总结 后的内容
+        summary_section = re.search(
+            r'###\s*5[\.、]\s*.*?(?:结论判定|归纳总结|结论).*?\n+(.+?)(?=###|$)',
+            reasoning_text,
+            re.IGNORECASE | re.DOTALL
+        )
+
+        if not summary_section:
+            # 降级：匹配"归纳总结"关键词后的内容
+            fallback = re.search(
+            r'(?:归纳总结|结论)[：:]*\s*\n*(.+?)(?=###|$)',
+                reasoning_text,
+                re.IGNORECASE | re.DOTALL
+            )
+            if fallback:
+                summary_section = fallback
+            else:
+                logger.warning("未能从推理结果中提取结论判定")
+                return None
+
+        full_text = summary_section.group(1).strip()
+        # 清理 Markdown 链接但保留加粗标记
+        full_text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', full_text)
+        full_text = self._normalize_ai_summary_format(full_text)
+
+        # brief 提取第一句话（核心结论）
+        brief = self._extract_brief_summary(full_text)
+
+        logger.info(f"从推理结果中提取归纳总结: {len(full_text)}字符")
+        return {
+            "full": full_text,
+            "brief": brief,
+            "retry_info": None
+        }
+
     def _extract_brief_summary(self, full_summary: str) -> str:
-        """
-        从完整归纳总结中提取简短摘要（1-2句话）
-
-        Args:
-            full_summary: 完整的AI归纳总结
-
-        Returns:
-            str: 简短摘要（最多150字符）
-        """
+        """从完整归纳总结中提取简短摘要（3-5句，目标200-350字）"""
         if not full_summary:
             return "暂无摘要"
 
-        # 尝试按段落分割，取第一段
-        paragraphs = full_summary.split('\n\n')
-        first_paragraph = paragraphs[0].strip()
+        # 清理 Markdown 标记但保留文字
+        text = self._normalize_ai_summary_format(full_summary)
+        text = self._keep_summary_opening_segment(text)
+        text = re.sub(r'\*\*', '', text)
+        text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
+        text = re.sub(r'^#{1,4}\s+', '', text, flags=re.MULTILINE)
+        text = re.sub(r'^[•\-\*]\s+', '', text, flags=re.MULTILINE)
+        text = self._remove_summary_section_headings(text)
+        text = text.strip()
 
-        # 🔧 移除常见的标题标记，提取真正的摘要内容
-        # 标题格式可能是：**标题**\n内容 或 **标题**：内容
-        title_patterns = [
-            r'^\*\*核心事实提取\*\*[：:\s]*(?:\n\s*)?',  # **核心事实提取**
-            r'^\*\*核心结论摘要\*\*[：:\s]*(?:\n\s*)?',  # **核心结论摘要**
-            r'^\*\*摘要\*\*[：:\s]*(?:\n\s*)?',         # **摘要**
-            r'^核心结论[：:\s]*(?:\n\s*)?',               # 核心结论
-            r'^摘要[：:\s]*(?:\n\s*)?',                  # 摘要
-            r'^###\s*\*\*摘要\*\*\s*',                   # ### **摘要**
-            r'^•\s*\*\*.*?\*\*',                         # 以 • ** 开头的列表项标题
+        # 提取完整句子（以。！？结尾）
+        sentences = []
+        current = ''
+        for char in text:
+            current += char
+            if char in '。！？.!?':
+                sentence = current.strip()
+                if len(sentence) > 10:
+                    sentences.append(sentence)
+                current = ''
+                if len(sentences) >= 3 and sum(len(s) for s in sentences) >= 200:
+                    break
+                if len(sentences) >= 5:
+                    break
+
+        # 如果没找到完整句子，回退到前350字符
+        if not sentences:
+            return text[:347] + '...' if len(text) > 350 else text or '暂无摘要'
+
+        brief = ''.join(sentences)
+
+        # 超过400字截取到句号
+        if len(brief) > 400:
+            for i in range(399, 150, -1):
+                if brief[i] in '。！？.!?':
+                    brief = brief[:i + 1]
+                    break
+            else:
+                brief = brief[:347] + '...'
+
+        return brief or '暂无摘要'
+
+    def _normalize_ai_summary_format(self, text: str) -> str:
+        """规整模型摘要格式，避免列表项粘连到上一句。"""
+        if not text:
+            return ""
+
+        normalized = text.replace('\r\n', '\n').replace('\r', '\n')
+        normalized = re.sub(r'[ \t]+\n', '\n', normalized)
+        normalized = re.sub(r'(?<=[。！？.!?])\s+(?=(?:[-•*]|\d+[\.、])\s+)', '\n', normalized)
+        normalized = re.sub(r'(?<=[。！？.!?])(?=(?:[-•*]|\d+[\.、])\s+)', '\n', normalized)
+        normalized = re.sub(r'\n{2,}', '\n', normalized)
+        return normalized.strip()
+
+    def _keep_summary_opening_segment(self, text: str) -> str:
+        """优先保留模型输出中的开头摘要段，丢弃展开分析。"""
+        if not text:
+            return ""
+
+        split_markers = [
+            r'【\s*展开分析\s*】',
+            r'^\s*展开分析[：:]?\s*$',
+            r'^\s*(?:[-•*]\s*)?\**核心事实提取\**[：:]\s*',
+            r'^\s*(?:[-•*]\s*)?\**深度洞察\**[：:]\s*',
+            r'^\s*(?:[-•*]\s*)?\**洞察分析\**[：:]\s*',
+            r'^\s*(?:[-•*]\s*)?\**与说法的(?:精确对比|关系)\**[：:]\s*',
         ]
 
-        for pattern in title_patterns:
-            first_paragraph = re.sub(pattern, '', first_paragraph, flags=re.IGNORECASE | re.MULTILINE).strip()
+        opening = text
+        for marker in split_markers:
+            match = re.search(marker, opening, flags=re.MULTILINE)
+            if match:
+                opening = opening[:match.start()]
+                break
 
-        # 🔧 如果第一段移除标题后为空或太短，尝试使用第二段
-        if len(first_paragraph) < 10 and len(paragraphs) > 1:
-            second_paragraph = paragraphs[1].strip()
-            # 清理第二段中的Markdown符号
-            second_paragraph = re.sub(r'^[•\-\*]+\s*\*\*', '', second_paragraph).strip()
-            second_paragraph = re.sub(r'\*\*', '', second_paragraph).strip()
-            if len(second_paragraph) > 10:
-                first_paragraph = second_paragraph
+        opening = re.sub(r'【\s*开头段落\s*】\s*', '', opening)
+        opening = re.sub(r'^\s*开头段落[：:]?\s*', '', opening, flags=re.MULTILINE)
+        return opening.strip() or text
 
-        # 🧹 清理Markdown格式符号（避免前端显示原始标记）
-        first_paragraph = first_paragraph.replace('**', '').replace('*', '')  # 移除粗体/斜体
-        first_paragraph = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', first_paragraph)  # 移除链接，保留文本
-        first_paragraph = first_paragraph.replace('`', '')  # 移除代码符号
-        first_paragraph = first_paragraph.strip()
+    def _remove_summary_section_headings(self, text: str) -> str:
+        """从简短摘要候选文本中移除结构化分节标题。"""
+        section_headings = (
+            "开头段落",
+            "展开分析",
+            "核心事实提取",
+            "核心事实",
+            "深度洞察",
+            "洞察分析",
+            "与说法的精确对比",
+            "与说法的关系",
+            "展开分析",
+        )
 
-        # 如果第一段超过150字符，截取到第一个句号
-        if len(first_paragraph) > 150:
-            # 寻找第一个句号、问号或感叹号
-            for i, char in enumerate(first_paragraph):
-                if char in '。！？.!?':
-                    return first_paragraph[:i+1]
-            # 如果没有标点，直接截取前150字符
-            return first_paragraph[:147] + "..."
+        cleaned_lines = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            stripped = re.sub(r'^[•\-\*]\s*', '', stripped)
+            stripped = re.sub(r'^\d+[\.、]\s*', '', stripped)
+            stripped = stripped.strip()
 
-        return first_paragraph if first_paragraph else "暂无摘要"
+            heading_only = stripped.strip('* ：:') in section_headings
+            if heading_only:
+                continue
+
+            for heading in section_headings:
+                stripped = re.sub(
+                    rf'^\**{re.escape(heading)}\**[：:]\s*(?=(?:[-•*]|\d+[\.、])\s+)',
+                    '',
+                    stripped
+                )
+
+            if stripped:
+                cleaned_lines.append(stripped)
+
+        return "\n".join(cleaned_lines)
 
     def _extract_stances_from_reasoning(
         self,
@@ -808,83 +1281,198 @@ class EvidenceChainGenerator:
         evidences: List[RankedEvidence]
     ) -> Dict[str, str]:
         """
-        从GLM-5推理文本中提取证据立场信息
+        从LLM推理文本中提取证据立场信息
 
         Args:
-            reasoning_text: GLM-5生成的推理文本
+            reasoning_text: LLM生成的推理文本
             evidences: 证据列表
 
         Returns:
             Dict[str, str]: URL到立场的映射 {"support", "oppose", "neutral"}
         """
-        import re
-
         logger.info("开始从推理文本中提取证据立场...")
 
-        # 匹配固定格式（修改prompt后GLM-5应该使用此格式）：
-        # *   **证据 [1] [标题](URL)**
-        #     *   **立场**：**支持**（请选择：支持/反对/中性，三者选一）
-        #     *   **分析**：...
-
-        pattern = re.compile(
-            r'\*\*证据\s*\[\d+\]\s*\[([^\]]+)\]\(([^)]+)\).*?\*\*立场\*\*[:：]\s*\*\*(支持|反对|中性)\*\*',
-            re.DOTALL
-        )
-
         stance_map = {}
-        matched_urls = set()
 
-        for match in pattern.finditer(reasoning_text):
-            title = match.group(1).strip()
-            url = match.group(2).strip()
-            stance_cn = match.group(3).strip()
+        # 策略1: 精确格式匹配 - **证据 [N] [标题](URL)** - **立场**：**支持/反对/中性**
+        patterns_strict = [
+            re.compile(
+                r'\*\*证据\s*\[\d+\]\s*\[([^\]]+)\]\(([^)]+)\).*?\*\*立场\*\*[：:]\s*\*\*(支持|反对|中性)\*\*',
+                re.DOTALL
+            ),
+            # 新prompt格式: **证据 [N] [标题](URL)** - **立场**：**支持**
+            re.compile(
+                r'\*\*证据\s*\[\d+\]\s*\[([^\]]+)\]\(([^)]+)\)[^*]*\*\*立场\*\*[：:]\s*\*\*(支持|反对|中性)\*\*',
+            ),
+        ]
 
-            # 映射到英文
-            stance_en = {
-                "支持": "support",
-                "反对": "oppose",
-                "中性": "neutral"
-            }.get(stance_cn, "neutral")
+        for pattern in patterns_strict:
+            for match in pattern.finditer(reasoning_text):
+                title = match.group(1).strip()
+                url = match.group(2).strip()
+                stance_cn = match.group(3).strip()
 
-            stance_map[url] = stance_en
-            matched_urls.add(url)
-            logger.info(f"✓ 提取立场: {title[:50]}... -> {stance_cn} -> {stance_en}")
+                stance_en = {"支持": "support", "反对": "oppose", "中性": "neutral"}.get(stance_cn, "neutral")
+                stance_map[url] = stance_en
+                logger.info(f"✓ 精确匹配立场: {title[:50]}... -> {stance_cn}")
 
-        # 回退策略：对于未匹配的证据，尝试通过URL在推理文本中查找立场关键词
-        for e in evidences:
-            if e.url not in stance_map:
-                # 在推理文本中查找该URL附近的立场关键词
-                url_pos = reasoning_text.find(e.url)
-                if url_pos != -1:
-                    # 提取URL前后300个字符的上下文
-                    context_start = max(0, url_pos - 300)
-                    context_end = min(len(reasoning_text), url_pos + 300)
-                    context = reasoning_text[context_start:context_end]
+        # 策略2: 宽松匹配 - 在URL附近查找立场关键词（无需严格格式）
+        if len(stance_map) < len(evidences):
+            # 构建每条证据在文本中的位置 -> 立场 映射
+            # 将文本按证据URL分割，每段对应一条证据
+            url_positions = []
+            for e in evidences:
+                pos = reasoning_text.find(e.url)
+                if pos != -1:
+                    url_positions.append((pos, e.url, e.title))
 
-                    # 检查立场关键词（优先支持，然后反对，最后中性）
-                    if "**支持**" in context or "**立场**：**支持**" in context:
-                        stance_map[e.url] = "support"
-                        logger.info(f"✓ 通过上下文提取立场: {e.title[:50]}... -> 支持")
-                    elif "**反对**" in context or "**立场**：**反对**" in context:
-                        stance_map[e.url] = "oppose"
-                        logger.info(f"✓ 通过上下文提取立场: {e.title[:50]}... -> 反对")
-                    elif "**中性**" in context or "**立场**：**中性**" in context:
-                        stance_map[e.url] = "neutral"
-                        logger.info(f"✓ 通过上下文提取立场: {e.title[:50]}... -> 中性")
+            # 按位置排序
+            url_positions.sort(key=lambda x: x[0])
+
+            for idx, (pos, url, title) in enumerate(url_positions):
+                if url in stance_map:
+                    continue  # 已经精确匹配过了
+
+                # 取当前URL到下一个URL之间的文本作为该证据的分析区域
+                start = pos
+                end = url_positions[idx + 1][0] if idx + 1 < len(url_positions) else min(len(reasoning_text), pos + 800)
+                section = reasoning_text[start:end]
+
+                # 在该区域查找立场关键词
+                # 优先匹配明确的立场声明
+                stance_patterns = [
+                    r'\*\*立场\*\*[：:]\s*\*\*(支持|反对|中性)\*\*',
+                    r'立场[：:]\s*\*\*(支持|反对|中性)\*\*',
+                    r'\*\*立场\*\*[：:](支持|反对|中性)',
+                    r'立场[：:]\s*(支持|反对|中性)',
+                ]
+
+                found = False
+                for sp in stance_patterns:
+                    m = re.search(sp, section)
+                    if m:
+                        stance_cn = m.group(1).strip()
+                        stance_en = {"支持": "support", "反对": "oppose", "中性": "neutral"}.get(stance_cn, "neutral")
+                        stance_map[url] = stance_en
+                        logger.info(f"✓ 宽松匹配立场: {title[:50]}... -> {stance_cn}")
+                        found = True
+                        break
+
+                if not found:
+                    # 最后尝试：在整个section中查找立场关键词的简单出现
+                    # 使用计数判断（出现次数最多的立场）
+                    support_count = len(re.findall(r'\*\*支持\*\*|立场.*?支持', section))
+                    oppose_count = len(re.findall(r'\*\*反对\*\*|立场.*?反对', section))
+                    neutral_count = len(re.findall(r'\*\*中性\*\*|立场.*?中性', section))
+
+                    if support_count > oppose_count and support_count > neutral_count:
+                        stance_map[url] = "support"
+                        logger.info(f"✓ 统计推断立场: {title[:50]}... -> 支持")
+                    elif oppose_count > support_count and oppose_count > neutral_count:
+                        stance_map[url] = "oppose"
+                        logger.info(f"✓ 统计推断立场: {title[:50]}... -> 反对")
+                    elif neutral_count > 0:
+                        stance_map[url] = "neutral"
+                        logger.info(f"✓ 统计推断立场: {title[:50]}... -> 中性")
                     else:
-                        # 真的无法提取，使用默认值
-                        logger.debug(f"⚠️ 无法从上下文提取立场: {e.url}")
+                        logger.debug(f"⚠️ 无法提取立场: {url}")
 
-        logger.info(f"从推理文本中共提取到 {len(stance_map)} 个证据的立场信息")
+        logger.info(f"从推理文本中共提取到 {len(stance_map)}/{len(evidences)} 个证据的立场信息")
 
-        # 统计有多少证据没有被提取到立场
         no_stance_count = sum(1 for e in evidences if e.url not in stance_map)
         if no_stance_count > 0:
-            logger.warning(f"⚠️ 有 {no_stance_count} 个证据未能从推理文本中提取立场，将默认为中性")
-            # 输出未匹配证据的URL，方便调试
+            logger.warning(f"⚠️ 有 {no_stance_count} 个证据未能提取立场，将默认为中性")
             for e in evidences:
                 if e.url not in stance_map:
-                    logger.debug(f"未匹配证据URL: {e.url}")
+                    logger.debug(f"未匹配证据: {e.title[:50]}")
 
         return stance_map
 
+    def _extract_evidence_analysis_from_reasoning(
+        self,
+        reasoning_text: str,
+        evidences: List[RankedEvidence]
+    ) -> Dict[str, str]:
+        """
+        从模型推理文本中提取每条证据的分析内容。
+
+        模型在第1节"证据立场分析"中的输出格式：
+        **证据 [N] [标题](URL)** - 来源：**媒体** - **立场**：**支持** - 分析：该证据...
+
+        Args:
+            reasoning_text: 模型生成的推理文本
+            evidences: 证据列表
+
+        Returns:
+            Dict[str, str]: URL到分析文本的映射
+        """
+        logger.info("开始从推理文本中提取证据分析...")
+        analysis_map = {}
+
+        # 策略1: 精确匹配单行格式
+        pattern_strict = re.compile(
+            r'\*\*证据\s*\[\d+\]\s*\[([^\]]+)\]\(([^)]+)\).*?'
+            r'[–—\-]\s*分析[：:]\s*([^\n]+)',
+        )
+        for match in pattern_strict.finditer(reasoning_text):
+            url = match.group(2).strip()
+            analysis = match.group(3).strip()
+            analysis = re.sub(r'\*\*', '', analysis)
+            analysis = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', analysis)
+            if len(analysis) > 5:
+                analysis_map[url] = analysis[:300]
+                logger.info(f"✓ 精确匹配分析: {url[:60]}... -> {analysis[:60]}...")
+
+        # 策略2: 多行分析（分析内容跨越多行）
+        if len(analysis_map) < len(evidences):
+            pattern_multiline = re.compile(
+                r'\*\*证据\s*\[\d+\]\s*\[([^\]]+)\]\(([^)]+)\).*?'
+                r'[–—\-]\s*分析[：:]\s*(.*?)(?=\*\*证据\s*\[|\n###|\Z)',
+                re.DOTALL
+            )
+            for match in pattern_multiline.finditer(reasoning_text):
+                url = match.group(2).strip()
+                if url in analysis_map:
+                    continue
+                analysis = match.group(3).strip()
+                lines = [l.strip() for l in analysis.split('\n') if l.strip()]
+                if lines:
+                    analysis = lines[0]
+                analysis = re.sub(r'\*\*', '', analysis)
+                analysis = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', analysis)
+                if len(analysis) > 5:
+                    analysis_map[url] = analysis[:300]
+                    logger.info(f"✓ 多行匹配分析: {url[:60]}... -> {analysis[:60]}...")
+
+        # 策略3: 按URL分段，在证据段落内查找"分析："
+        if len(analysis_map) < len(evidences):
+            url_positions = []
+            for e in evidences:
+                pos = reasoning_text.find(e.url)
+                if pos != -1:
+                    url_positions.append((pos, e.url, e.title))
+            url_positions.sort(key=lambda x: x[0])
+
+            for idx, (pos, url, title) in enumerate(url_positions):
+                if url in analysis_map:
+                    continue
+
+                start = pos
+                end = url_positions[idx + 1][0] if idx + 1 < len(url_positions) else min(len(reasoning_text), pos + 800)
+                section = reasoning_text[start:end]
+
+                analysis_match = re.search(
+                    r'[–—\-]\s*分析[：:]\s*([^\n].*?)(?=\n\s*\n|\n\*\*|\Z)',
+                    section,
+                    re.DOTALL
+                )
+                if analysis_match:
+                    analysis = analysis_match.group(1).strip()
+                    analysis = re.sub(r'\*\*', '', analysis)
+                    analysis = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', analysis)
+                    if len(analysis) > 5:
+                        analysis_map[url] = analysis[:300]
+                        logger.info(f"✓ 分段匹配分析: {title[:50]}...")
+
+        logger.info(f"从推理文本中共提取到 {len(analysis_map)}/{len(evidences)} 个证据的分析")
+        return analysis_map
