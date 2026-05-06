@@ -67,6 +67,9 @@ app.include_router(evidence_router)
 app.include_router(validation_router)
 
 
+BUILD_MARKER = "core-evidence-refilter-746ef4d"
+
+
 # ---- Static routes ----
 @app.get("/")
 async def root():
@@ -96,6 +99,19 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "healthy"}
+
+
+@app.get("/version")
+async def version():
+    return {
+        "version": "2.0.0",
+        "build_marker": BUILD_MARKER,
+        "git_commit": os.getenv("RAILWAY_GIT_COMMIT_SHA", ""),
+        "git_branch": os.getenv("RAILWAY_GIT_BRANCH", ""),
+        "git_repo": os.getenv("RAILWAY_GIT_REPO_NAME", ""),
+        "service": os.getenv("RAILWAY_SERVICE_NAME", ""),
+        "environment": os.getenv("RAILWAY_ENVIRONMENT_NAME", ""),
+    }
 
 
 if __name__ == "__main__":
