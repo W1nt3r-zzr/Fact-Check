@@ -423,10 +423,10 @@ class SearchRulesTests(unittest.TestCase):
 
         self.assertEqual([item.url for item in filtered], ["https://example.com/fresh"])
 
-    def test_legal_finality_claim_drops_background_even_with_recent_metadata(self):
+    def test_legal_finality_claim_keeps_recent_background_when_core_terms_match(self):
         claim = "黄子佼藏未成年性影像终审"
         background = SearchResult(
-            name="黄子佼持有未成年性影像案件背景",
+            name="黄子佼持有未成年性影像案最新报道",
             url="https://example.com/background",
             summary="黄子佼因下载并持有2259部未成年性影像被起诉，此前与多名被害人和解。",
             date_published=(date.today() - timedelta(days=1)).isoformat(),
@@ -441,6 +441,27 @@ class SearchRulesTests(unittest.TestCase):
         )
 
         filtered = _filter_irrelevant_results(claim, [background, finality], min_relevance=0.2)
+
+        self.assertEqual([item.url for item in filtered], ["https://example.com/finality", "https://example.com/background"])
+
+    def test_legal_finality_claim_still_drops_stale_background_history(self):
+        claim = "黄子佼藏未成年性影像终审"
+        stale_background = SearchResult(
+            name="黄子佼持有未成年性影像二审改判",
+            url="https://example.com/stale-background",
+            summary="黄子佼因下载并持有2259部未成年性影像被起诉，二审改判有期徒刑1年6个月、缓刑4年，可上诉第三审。",
+            date_published=(date.today() - timedelta(days=90)).isoformat(),
+            source="example",
+        )
+        finality = SearchResult(
+            name="黄子佼持有未成年性影像案终审定谳",
+            url="https://example.com/finality",
+            summary="最高法院驳回检方上诉，黄子佼缓刑定谳，全案终审确定。",
+            date_published=(date.today() - timedelta(days=1)).isoformat(),
+            source="example",
+        )
+
+        filtered = _filter_irrelevant_results(claim, [stale_background, finality], min_relevance=0.2)
 
         self.assertEqual([item.url for item in filtered], ["https://example.com/finality"])
 

@@ -332,7 +332,11 @@ def _has_legal_core_coverage(claim: str, result: SearchResult) -> bool:
         '驳回检方上诉', '駁回檢方上訴', '维持原判', '維持原判',
         '确定', '確定', '不得上诉', '不得上訴',
     ]
-    return any(marker in text for marker in resolution_markers)
+    if any(marker in text for marker in resolution_markers):
+        return True
+
+    age_days = _age_days(result.date_published)
+    return age_days is not None and age_days <= 45
 
 
 def _detect_search_preference(claim: str) -> str:
