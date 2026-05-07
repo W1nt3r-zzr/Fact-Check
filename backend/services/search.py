@@ -6,6 +6,7 @@ import re
 from datetime import datetime, date
 from dataclasses import dataclass
 from typing import List, Optional
+from urllib.parse import urlparse
 
 import httpx
 
@@ -159,14 +160,33 @@ def _is_recent_claim(claim: str) -> bool:
 
 
 def _is_event_claim(claim: str) -> bool:
-    """识别新闻/监管/突发事件类说法，即使没有显式时间词也应优先近期证据。"""
+    """识别新闻/监管/动态事实类说法，即使没有显式时间词也应优先近期证据。"""
     event_terms = [
         '被约谈', '约谈', '通报', '处罚', '罚款', '立案', '调查', '召回',
         '下架', '整改', '封禁', '回应', '辟谣', '发布', '宣布', '发生',
         '爆发', '起火', '爆炸', '事故', '涨价', '降价', '停产', '停业',
-        '闭园', '停运', '破产', '收购', '上市', '退市',
+        '闭园', '停运', '破产', '收购', '上市', '退市', '曝光',
+        '起诉', '公诉', '开庭', '宣判', '判决', '判刑', '被判', '裁定',
+        '终审', '定谳', '上诉', '驳回', '不起诉', '无罪', '获刑', '缓刑',
     ]
-    return any(term in claim for term in event_terms)
+    if any(term in claim for term in event_terms):
+        return True
+    return not _is_stable_science_or_common_claim(claim)
+
+
+def _is_stable_science_or_common_claim(claim: str) -> bool:
+    """识别不应默认套近期新闻窗口的权威科学、健康、法规解释或常识类问题。"""
+    if _is_authority_claim(claim):
+        return True
+
+    common_terms = [
+        '太阳', '月亮', '地球', '水', '冰', '结冰', '沸腾', '沸点', '蒸发',
+        '光速', '重力', '引力', '温度', '密度', '声音', '光合作用',
+    ]
+    common_question_terms = ['为什么', '是什么', '原理', '会不会', '能不能', '能否', '是否', '吗', '呢']
+    has_common_subject = any(term in claim for term in common_terms)
+    has_common_question = any(term in claim for term in common_question_terms)
+    return has_common_subject and has_common_question
 
 
 def _is_time_sensitive_claim(claim: str) -> bool:
@@ -255,6 +275,64 @@ def _is_authority_claim(claim: str) -> bool:
         '标准', '规定', '监管', '许可', '认证',
     ]
     return any(term in claim for term in authority_terms)
+
+
+def _is_legal_dynamic_claim(claim: str) -> bool:
+    """识别案件进展、裁判结果、执法处罚等需要近期司法事实的法律类说法。"""
+    legal_subject_terms = [
+        '法院', '法庭', '检方', '检察', '检察官', '检察院', '警方', '警局',
+        '案件', '案', '判决', '裁定', '审判', '诉讼', '公诉', '起诉',
+        '上诉', '终审', '一审', '二审', '定谳', '定讞',
+    ]
+    legal_action_terms = [
+        '起诉', '公诉', '开庭', '宣判', '判决', '判刑', '被判', '裁定',
+        '终审', '定谳', '定讞', '上诉', '驳回', '駁回', '维持原判', '維持原判',
+        '不起诉', '不起訴', '无罪', '無罪', '获刑', '獲刑', '缓刑', '緩刑',
+        '羁押', '羈押', '保释', '保釋', '逮捕', '拘留', '立案', '侦查', '偵查',
+    ]
+    text = claim or ''
+    return any(term in text for term in legal_action_terms) or (
+        any(term in text for term in legal_subject_terms) and any(term in text for term in ('结果', '進展', '进展', '最新'))
+    )
+
+
+def _has_legal_resolution_focus(claim: str) -> bool:
+    """终局裁判类claim需要结果锚点，不能只用案情回顾作核心证据。"""
+    finality_terms = [
+        '终审', '定谳', '定讞', '最终判决', '最終判決', '判决确定', '判決確定',
+        '全案确定', '全案確定', '驳回上诉', '駁回上訴', '维持原判', '維持原判',
+        '最高法院', '不得上诉', '不得上訴',
+    ]
+    return any(term in (claim or '') for term in finality_terms)
+
+
+def _has_legal_core_coverage(claim: str, result: SearchResult) -> bool:
+    """法律动态证据必须覆盖对应司法动作，避免近期转载的历史背景挤占核心证据。"""
+    if not _is_legal_dynamic_claim(claim):
+        return True
+
+    text = re.sub(r'\s+', '', f"{result.name} {result.summary}")
+    legal_markers = [
+        '法院', '法庭', '检方', '檢方', '检察', '檢察', '警方', '警局',
+        '起诉', '起訴', '公诉', '公訴', '开庭', '開庭', '宣判', '判决', '判決',
+        '判刑', '被判', '裁定', '审理', '審理', '上诉', '上訴', '驳回', '駁回',
+        '终审', '終審', '定谳', '定讞', '获刑', '獲刑', '缓刑', '緩刑',
+        '不起诉', '不起訴', '无罪', '無罪', '羁押', '羈押', '保释', '保釋',
+        '逮捕', '拘留', '立案', '侦查', '偵查',
+    ]
+    if not any(marker in text for marker in legal_markers):
+        return False
+
+    if not _has_legal_resolution_focus(claim):
+        return True
+
+    resolution_markers = [
+        '最高法院', '终审', '終審', '定谳', '定讞', '最终判决', '最終判決',
+        '判决确定', '判決確定', '全案确定', '全案確定', '驳回上诉', '駁回上訴',
+        '驳回检方上诉', '駁回檢方上訴', '维持原判', '維持原判',
+        '确定', '確定', '不得上诉', '不得上訴',
+    ]
+    return any(marker in text for marker in resolution_markers)
 
 
 def _detect_search_preference(claim: str) -> str:
@@ -456,6 +534,16 @@ def _age_days(date_published: str) -> Optional[int]:
     return max(0, (date.today() - published).days)
 
 
+def _extract_years_from_text(text: str) -> set[int]:
+    years = set()
+    for match in re.findall(r'(?<!\d)(20\d{2})(?=年|[-/.])?', text or ''):
+        try:
+            years.add(int(match))
+        except ValueError:
+            continue
+    return years
+
+
 def _is_stale_for_recent_claim(claim: str, result: SearchResult) -> bool:
     """
     对明显近期性、事件类或价格状态类claim，超过时间窗口的旧新闻直接降级处理。
@@ -467,8 +555,12 @@ def _is_stale_for_recent_claim(claim: str, result: SearchResult) -> bool:
         return False
     age_days = _age_days(result.date_published)
     if age_days is None:
-        return is_time_sensitive
+        return is_event_or_explicit_recent or is_time_sensitive
     stale_window_days = 45
+    text_years = _extract_years_from_text(f"{result.name} {result.summary}")
+    current_year = date.today().year
+    if text_years and max(text_years) < current_year:
+        return True
     return age_days > stale_window_days
 
 
@@ -482,6 +574,9 @@ def _filter_irrelevant_results(claim: str, results: List[SearchResult], min_rele
     scored = []
     for r in results:
         if not _has_time_sensitive_core_coverage(claim, r):
+            scored.append((r, 0.0, 0.0, -1.0, True))
+            continue
+        if not _has_legal_core_coverage(claim, r):
             scored.append((r, 0.0, 0.0, -1.0, True))
             continue
         relevance = _compute_relevance(claim, r)
@@ -680,19 +775,37 @@ async def _do_tavily_search(search_query: str) -> SearchFetchResult:
         return SearchFetchResult(items=[], estimated_total=0)
 
 
+def _normalize_url_for_dedup(url: str) -> str:
+    """规范化 URL 用于去重：去掉查询参数、锚点，统一小写。"""
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    return (parsed.scheme + "://" + parsed.netloc + parsed.path).rstrip("/").lower()
+
+
 def _merge_dedup(main_results: List[SearchResult], extra_results: List[SearchResult]) -> int:
-    """合并搜索结果并按URL去重，返回新增条数"""
-    seen_urls = {r.url for r in main_results if r.url}
+    """合并搜索结果并按规范化URL和标题去重，返回新增条数。"""
+    seen_norm_urls = {_normalize_url_for_dedup(r.url) for r in main_results if r.url}
     seen_pairs = {(r.name.strip(), r.source.strip()) for r in main_results}
+    seen_titles = {r.name.strip() for r in main_results if r.name.strip()}
     added = 0
     for r in extra_results:
+        norm_url = _normalize_url_for_dedup(r.url)
         pair = (r.name.strip(), r.source.strip())
-        if r.url and r.url in seen_urls:
+        title = r.name.strip()
+        # 1. 规范化 URL 去重
+        if norm_url and norm_url in seen_norm_urls:
             continue
+        # 2. 标题完全匹配去重（忽略 source 差异，处理转载）
+        if title and title in seen_titles:
+            continue
+        # 3. 原始 (name, source) 对去重
         if not r.url and pair in seen_pairs:
             continue
-        if r.url:
-            seen_urls.add(r.url)
+        if norm_url:
+            seen_norm_urls.add(norm_url)
+        if title:
+            seen_titles.add(title)
         seen_pairs.add(pair)
         main_results.append(r)
         added += 1
@@ -786,7 +899,7 @@ async def _run_tavily_fallback(plan: List[SearchPlanItem], claim: str) -> Search
     )
 
 
-async def search_with_zhipu(claim: str, _unused_client=None) -> List[SearchResult]:
+async def search_evidence(claim: str, _unused_client=None) -> List[SearchResult]:
     """搜索证据：Bocha主搜索 + Tavily补召回 + 相关性过滤。"""
     try:
         plan = _build_search_plan(claim)
@@ -828,3 +941,8 @@ async def search_with_zhipu(claim: str, _unused_client=None) -> List[SearchResul
     except Exception as e:
         logger.error(f"搜索API调用异常: {e}")
         return []
+
+
+async def search_with_zhipu(claim: str, _unused_client=None) -> List[SearchResult]:
+    """兼容旧入口；实际搜索已切换为 Bocha 主搜索。"""
+    return await search_evidence(claim, _unused_client)

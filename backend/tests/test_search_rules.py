@@ -12,12 +12,14 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from models import SearchResult
-from services.search import _build_search_plan, _detect_search_preference, _do_search, _filter_irrelevant_results
+from services.search import _build_search_plan, _detect_search_preference, _do_search, _filter_irrelevant_results, _run_search_plan, SearchFetchResult
 
 
 class SearchRulesTests(unittest.TestCase):
-    def test_general_claim_does_not_force_exact_match_or_year_filter(self):
+    def test_general_public_claim_defaults_to_freshness_without_year_filter(self):
         claim = "小米汽车 SU7 销量突破 10 万台"
+
+        self.assertEqual(_detect_search_preference(claim), "freshness")
 
         plan = _build_search_plan(claim)
 
@@ -25,6 +27,7 @@ class SearchRulesTests(unittest.TestCase):
         self.assertEqual(plan[0].query, "小米汽车 SU7 销量突破 10 万台")
         self.assertIsNone(plan[0].recency_filter)
         self.assertTrue(any(item.query == '"小米汽车 SU7 销量突破 10 万台"' for item in plan))
+        self.assertTrue(any(item.recency_filter == "month" for item in plan))
         self.assertFalse(any(item.recency_filter == "year" for item in plan))
 
     def test_recent_claim_uses_month_filter_instead_of_global_year_filter(self):
@@ -59,6 +62,18 @@ class SearchRulesTests(unittest.TestCase):
 
     def test_health_claim_defaults_to_authority_preference(self):
         self.assertEqual(_detect_search_preference("热柠檬水能杀癌细胞"), "authority")
+
+    def test_legal_explanation_claim_defaults_to_authority_preference(self):
+        self.assertEqual(_detect_search_preference("个人信息保护法如何规定个人敏感信息"), "authority")
+
+    def test_common_knowledge_claim_keeps_relevance_preference(self):
+        claim = "水在0度会结冰吗"
+
+        self.assertEqual(_detect_search_preference(claim), "relevance")
+
+        plan = _build_search_plan(claim)
+
+        self.assertFalse(any(item.recency_filter == "month" for item in plan))
 
     def test_do_search_maps_month_recency_to_bocha_freshness(self):
         captured = {}
@@ -207,7 +222,7 @@ class SearchRulesTests(unittest.TestCase):
 
         filtered = _filter_irrelevant_results(claim, [stale, fresh], min_relevance=0.2)
 
-        self.assertEqual([item.name for item in filtered], ["fresh"])
+        self.assertEqual([item.url for item in filtered], ["https://example.com/fresh"])
 
     def test_event_claim_drops_stale_news_even_without_time_word(self):
         claim = "雅迪爱玛等电动车品牌被约谈"
@@ -228,7 +243,50 @@ class SearchRulesTests(unittest.TestCase):
 
         filtered = _filter_irrelevant_results(claim, [stale, fresh], min_relevance=0.2)
 
-        self.assertEqual([item.name for item in filtered], ["fresh"])
+        self.assertEqual([item.url for item in filtered], ["https://example.com/fresh"])
+
+    def test_event_claim_drops_undated_history_even_if_core_terms_match(self):
+        claim = "中国女子巴塞罗那街头遇害"
+        undated_history = SearchResult(
+            name="历史回顾：中国女子在巴塞罗那街头遇害案件",
+            url="https://example.com/history",
+            summary="中国女子巴塞罗那街头遇害，历史案件回顾与海外安全提醒。",
+            date_published="",
+            source="example",
+        )
+        fresh = SearchResult(
+            name="中国女子巴塞罗那街头遇害 中国驻巴塞罗那总领馆回应",
+            url="https://example.com/fresh",
+            summary="中国女子巴塞罗那街头遇害，嫌疑人已被逮捕，总领馆介入事件。",
+            date_published=(date.today() - timedelta(days=3)).isoformat(),
+            source="example",
+        )
+
+        filtered = _filter_irrelevant_results(claim, [undated_history, fresh], min_relevance=0.2)
+
+        self.assertEqual([item.url for item in filtered], ["https://example.com/fresh"])
+
+    def test_month_expansion_query_does_not_drop_relevant_event_results_missing_month_words(self):
+        claim = "中国女子巴塞罗那街头遇害"
+        plan = _build_search_plan(claim)
+        month_query = next(item for item in plan if item.recency_filter == "month")
+        relevant = SearchResult(
+            name="中国女子巴塞罗那街头遇害 嫌疑人被捕",
+            url="https://example.com/barcelona-case",
+            summary="中国女子在巴塞罗那街头遇害，嫌疑人已被当地警方逮捕，中国驻巴塞罗那总领馆介入。",
+            date_published=(date.today() - timedelta(days=2)).isoformat(),
+            source="example",
+        )
+
+        async def fake_do_search(query, _unused_client=None, recency_filter=None):
+            if query == month_query.query:
+                return SearchFetchResult(items=[relevant], estimated_total=1)
+            return SearchFetchResult(items=[], estimated_total=0)
+
+        with patch("services.search._do_search", new=AsyncMock(side_effect=fake_do_search)):
+            run = asyncio.run(_run_search_plan(plan))
+
+        self.assertEqual([item.url for item in run.items], ["https://example.com/barcelona-case"])
 
     def test_price_claim_drops_stale_historical_results(self):
         claim = "敦煌鸣沙山顶矿泉水只卖2元"
@@ -343,6 +401,48 @@ class SearchRulesTests(unittest.TestCase):
         filtered = _filter_irrelevant_results(claim, [undated, fresh], min_relevance=0.2)
 
         self.assertEqual([item.name for item in filtered], ["fresh"])
+
+    def test_time_sensitive_claim_drops_historical_year_mentions_even_with_recent_metadata(self):
+        claim = "敦煌鸣沙山顶矿泉水只卖2元"
+        historical = SearchResult(
+            name="2018年敦煌鸣沙山顶矿泉水只卖2元历史报道",
+            url="https://example.com/history",
+            summary="2018年游客记录显示，敦煌鸣沙山顶矿泉水只卖2元。",
+            date_published=(date.today() - timedelta(days=3)).isoformat(),
+            source="example",
+        )
+        fresh = SearchResult(
+            name="敦煌鸣沙山顶矿泉水只卖2元 景区回应",
+            url="https://example.com/fresh",
+            summary="敦煌鸣沙山顶矿泉水只卖2元，景区回应称该价格近期仍在执行。",
+            date_published=(date.today() - timedelta(days=3)).isoformat(),
+            source="example",
+        )
+
+        filtered = _filter_irrelevant_results(claim, [historical, fresh], min_relevance=0.2)
+
+        self.assertEqual([item.url for item in filtered], ["https://example.com/fresh"])
+
+    def test_legal_finality_claim_drops_background_even_with_recent_metadata(self):
+        claim = "黄子佼藏未成年性影像终审"
+        background = SearchResult(
+            name="黄子佼持有未成年性影像案件背景",
+            url="https://example.com/background",
+            summary="黄子佼因下载并持有2259部未成年性影像被起诉，此前与多名被害人和解。",
+            date_published=(date.today() - timedelta(days=1)).isoformat(),
+            source="example",
+        )
+        finality = SearchResult(
+            name="黄子佼持有未成年性影像案终审定谳",
+            url="https://example.com/finality",
+            summary="最高法院驳回检方上诉，黄子佼缓刑定谳，全案终审确定。",
+            date_published=(date.today() - timedelta(days=1)).isoformat(),
+            source="example",
+        )
+
+        filtered = _filter_irrelevant_results(claim, [background, finality], min_relevance=0.2)
+
+        self.assertEqual([item.url for item in filtered], ["https://example.com/finality"])
 
 
 if __name__ == "__main__":
