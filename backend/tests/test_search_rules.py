@@ -71,6 +71,26 @@ class SearchRulesTests(unittest.TestCase):
         self.assertTrue(any("定谳" in query or "定讞" in query for query in queries))
         self.assertTrue(any(item.recency_filter == "month" and "最高法院" in item.query for item in plan))
 
+    def test_legal_charge_claim_expands_to_prosecution_synonym_queries(self):
+        claim = "某艺人因持有未成年性影像被起诉"
+
+        plan = _build_search_plan(claim)
+        queries = [item.query for item in plan]
+
+        self.assertTrue(any("检方" in query and "起诉" in query for query in queries))
+        self.assertTrue(any("公诉" in query or "法院" in query for query in queries))
+        self.assertTrue(any(item.recency_filter == "month" and "起诉" in item.query for item in plan))
+
+    def test_legal_sentencing_claim_expands_to_judgment_synonym_queries(self):
+        claim = "黄子佼未成年性影像案二审改判缓刑"
+
+        plan = _build_search_plan(claim)
+        queries = [item.query for item in plan]
+
+        self.assertTrue(any("高院" in query or "高等法院" in query for query in queries))
+        self.assertTrue(any("判决" in query or "宣判" in query for query in queries))
+        self.assertTrue(any(item.recency_filter == "month" and "缓刑" in item.query for item in plan))
+
     def test_health_claim_defaults_to_authority_preference(self):
         self.assertEqual(_detect_search_preference("热柠檬水能杀癌细胞"), "authority")
 

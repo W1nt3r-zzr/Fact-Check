@@ -407,18 +407,18 @@ def _build_search_plan(claim: str) -> List[SearchPlanItem]:
         if simplified and simplified != query:
             add(f"{simplified} {month_str}", "month")
 
-    if _has_legal_resolution_focus(claim):
-        for legal_query in _build_legal_resolution_queries(query):
+    if _is_legal_dynamic_claim(claim):
+        for legal_query in _build_legal_dynamic_queries(claim, query):
             add(legal_query)
             add(f"{legal_query} {month_str}", "month")
 
     return plan
 
 
-def _build_legal_resolution_queries(query: str) -> List[str]:
-    """为终局裁判类说法补充地区媒体常用表述，提升近期终审报道召回。"""
+def _build_legal_dynamic_queries(claim: str, query: str) -> List[str]:
+    """为法律动态说法补充司法报道常用表述，提升跨媒体召回。"""
     base = re.sub(
-        r'(终审|終審|定谳|定讞|最终判决|最終判決|判决确定|判決確定|全案确定|全案確定|驳回上诉|駁回上訴|最高法院|三审|第三审)',
+        r'(终审|終審|定谳|定讞|最终判决|最終判決|判决确定|判決確定|全案确定|全案確定|驳回上诉|駁回上訴|最高法院|三审|第三审|起诉|起訴|公诉|公訴|开庭|開庭|宣判|判决|判決|判刑|被判|裁定|二审|二審|一审|一審|改判|缓刑|緩刑|获刑|獲刑)',
         '',
         query or ''
     )
@@ -426,11 +426,30 @@ def _build_legal_resolution_queries(query: str) -> List[str]:
     if not base:
         base = query.strip()
 
-    candidates = [
-        f"{base} 最高法院 驳回 上诉",
-        f"{base} 终审 定谳",
-        f"{base} 三审 定讞",
-    ]
+    text = claim or ''
+    candidates = []
+
+    if any(term in text for term in ('起诉', '起訴', '公诉', '公訴')):
+        candidates.extend([
+            f"{base} 检方 起诉",
+            f"{base} 公诉 法院",
+            f"{base} 检察 起诉",
+        ])
+
+    if any(term in text for term in ('开庭', '開庭', '宣判', '判决', '判決', '判刑', '被判', '裁定', '一审', '一審', '二审', '二審', '改判', '缓刑', '緩刑', '获刑', '獲刑')):
+        candidates.extend([
+            f"{base} 高院 判决",
+            f"{base} 高等法院 宣判",
+            f"{base} 判刑 缓刑 上诉",
+        ])
+
+    if _has_legal_resolution_focus(claim):
+        candidates.extend([
+            f"{base} 最高法院 驳回 上诉",
+            f"{base} 终审 定谳",
+            f"{base} 三审 定讞",
+        ])
+
     return [re.sub(r'\s+', ' ', candidate).strip() for candidate in candidates if candidate.strip()]
 
 
