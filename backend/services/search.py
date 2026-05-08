@@ -407,7 +407,31 @@ def _build_search_plan(claim: str) -> List[SearchPlanItem]:
         if simplified and simplified != query:
             add(f"{simplified} {month_str}", "month")
 
+    if _has_legal_resolution_focus(claim):
+        for legal_query in _build_legal_resolution_queries(query):
+            add(legal_query)
+            add(f"{legal_query} {month_str}", "month")
+
     return plan
+
+
+def _build_legal_resolution_queries(query: str) -> List[str]:
+    """为终局裁判类说法补充地区媒体常用表述，提升近期终审报道召回。"""
+    base = re.sub(
+        r'(终审|終審|定谳|定讞|最终判决|最終判決|判决确定|判決確定|全案确定|全案確定|驳回上诉|駁回上訴|最高法院|三审|第三审)',
+        '',
+        query or ''
+    )
+    base = re.sub(r'\s+', ' ', base).strip()
+    if not base:
+        base = query.strip()
+
+    candidates = [
+        f"{base} 最高法院 驳回 上诉",
+        f"{base} 终审 定谳",
+        f"{base} 三审 定讞",
+    ]
+    return [re.sub(r'\s+', ' ', candidate).strip() for candidate in candidates if candidate.strip()]
 
 
 def _simplify_claim_for_search(claim: str) -> str:
