@@ -11,8 +11,35 @@ from config import config, logger
 from models import SearchResult
 
 
+def sanitize_model_preamble(text: str) -> str:
+    """Remove assistant-style opening chatter from model analysis output."""
+    if not text:
+        return text
+
+    cleaned = text.replace('\r\n', '\n').replace('\r', '\n').lstrip()
+    preamble_patterns = [
+        r'^好的[，,]\s*作为[^。\n]{0,80}(?:助手|专家)[，,]\s*以下是[^。\n]{0,120}(?:分析|报告)[。\n]*\s*',
+        r'^好的[，,]\s*以下是[^。\n]{0,120}(?:分析|报告)[。\n]*\s*',
+        r'^作为[^。\n]{0,80}(?:助手|专家)[，,]\s*以下是[^。\n]{0,120}(?:分析|报告)[。\n]*\s*',
+        r'^以下是[^。\n]{0,120}(?:可信度分析|分析报告)[。\n]*\s*',
+    ]
+
+    changed = True
+    while changed:
+        changed = False
+        for pattern in preamble_patterns:
+            next_cleaned = re.sub(pattern, '', cleaned, count=1, flags=re.IGNORECASE)
+            if next_cleaned != cleaned:
+                cleaned = next_cleaned.lstrip()
+                changed = True
+                break
+
+    return cleaned
+
+
 def extract_structured_info_from_reasoning(reasoning_text: str) -> Dict[str, Any]:
     """从LLM的自然语言分析中提取结构化信息"""
+    reasoning_text = sanitize_model_preamble(reasoning_text)
 
     result = {
         "verdict": "详见下方证据链分析",
@@ -189,10 +216,10 @@ def build_llm_prompt(claim: str, evidence_list: List[SearchResult]) -> str:
 使用 [标题](URL) 格式引用关键内容。
 
 ### 3. 证据关系分析
-说明证据间的印证、矛盾或对立关系。
+说明证据间的印证、矛盾或对立关系。需要区分“多个网站发布”与“多个独立信源”：如果多条证据标题、措辞、事实细节高度相似，可能是同一原始报道的转载或改写，不能直接视为多方交叉核实。
 
 ### 4. 不确定性与局限
-指出证据数量、时效性、来源局限等。
+指出证据数量、时效性、来源局限、转载/洗稿导致的表面多源问题等。
 
 ### 5. 归纳总结（必须包含）
 
@@ -217,6 +244,7 @@ def build_llm_prompt(claim: str, evidence_list: List[SearchResult]) -> str:
 - ✅ 第5节开头段落必须2-3句、80-150字，不要超过3句
 - ✅ 第5节开头段落必须是自然语言摘要，不要出现"核心事实提取""洞察分析"等分节标题
 - ✅ 展开分析中的每个项目符号必须单独占一行，禁止把两个项目符号写在同一行
+- ✅ 直接从“### 1. 证据立场分析”开始输出，不要输出“好的”“作为专业信息核查助手”“以下是”等寒暄或角色自述
 - ⚠️ 格式严格性说明：系统通过正则匹配 `**立场**：**支持/反对/中性**` 提取立场，格式偏差会导致立场提取失败
 - ⚠️ 禁止在输出中纠结来源名称，不确定就填"媒体报道"，直接给出结论，不要展示推理过程
 
@@ -258,7 +286,7 @@ async def call_llm_api(
         if enable_thinking:
             logger.info("深度思考模式已启用")
 
-        response = zhipu_client.chat.completions.create(**request_params)
+        response = await zhipu_client.chat.completions.create(**request_params)
 
         # 处理非流式响应
         message = response.choices[0].message
@@ -276,6 +304,7 @@ async def call_llm_api(
                 result_text = thinking_process
                 logger.info("使用reasoning_content作为主要响应内容")
 
+        result_text = sanitize_model_preamble(result_text)
         logger.info(f"LLM原始响应长度: {len(result_text) if result_text else 0}")
 
         if hasattr(response.choices[0], 'finish_reason'):
