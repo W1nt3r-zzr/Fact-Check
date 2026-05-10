@@ -1,16 +1,21 @@
 {
   "manifest_version": 3,
   "name": "AI信息核查助手",
-  "version": "1.0.0",
-  "description": "基于GLM-5的智能信息核查工具，帮你快速验证网络信息的真实性",
+  "version": "2.0.0",
+  "description": "基于DeepSeek的智能信息核查工具，帮你快速验证网络信息的真实性",
 
   "permissions": [
     "activeTab",
+    "scripting",
+    "tabs",
     "storage"
   ],
 
   "host_permissions": [
-    "http://localhost:8000/*"
+    "<all_urls>",
+    "http://localhost:8000/*",
+    "https://*.ngrok-free.dev/*",
+    "https://*.up.railway.app/*"
   ],
 
   "action": {
@@ -18,10 +23,15 @@
     "default_title": "AI信息核查助手"
   },
 
+  "background": {
+    "service_worker": "background.js"
+  },
+
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["content/content.js"],
+      "js": ["config.js", "utils/dom.js", "utils/markdown.js", "utils/highlight.js", "content/content.js"],
+      "css": ["content/content.css"],
       "run_at": "document_idle"
     }
   ]
