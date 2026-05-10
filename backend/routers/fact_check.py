@@ -4,9 +4,10 @@ Fact-check route handlers: standard and streaming.
 import time
 import json
 import asyncio
+import inspect
 import logging
 import re
-from typing import List
+from typing import Any, AsyncIterator, List
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException
@@ -29,6 +30,24 @@ _link_validator = None
 _consistency_scorer = None
 _evidence_chain_generator = None
 _task_queue = FactCheckTaskQueue(config.MAX_CONCURRENT_CHECKS)
+
+
+async def _resolve_maybe_awaitable(value: Any) -> Any:
+    """Support both async SDK clients and sync clients with OpenAI-compatible APIs."""
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def _iterate_llm_stream(stream: Any) -> AsyncIterator[Any]:
+    """Yield chunks from either an AsyncStream or a regular Stream."""
+    if hasattr(stream, "__aiter__"):
+        async for chunk in stream:
+            yield chunk
+        return
+
+    for chunk in stream:
+        yield chunk
 
 
 def _normalize_title_for_source_dedup(title: str) -> str:
@@ -299,12 +318,14 @@ async def fact_check_stream(request: FactCheckRequest):
                 logger.info("深度思考模式已启用")
                 yield await progress_event("thinking_start", "AI开始深度思考...", estimated_time=150)
 
-            response = await _llm_client.chat.completions.create(**request_params)
+            response = await _resolve_maybe_awaitable(
+                _llm_client.chat.completions.create(**request_params)
+            )
 
             full_content = ""
             thinking_content = ""
 
-            async for chunk in response:
+            async for chunk in _iterate_llm_stream(response):
                 if chunk.choices and chunk.choices[0].delta:
                     delta = chunk.choices[0].delta
 
@@ -469,7 +490,7 @@ async def fact_check(request: FactCheckRequest):
             prompt,
             _llm_client,
             enable_thinking=request.enable_thinking,
-            stream=request.stream
+            stream=False
         )
         reasoning_result["reasoning"] = sanitize_model_preamble(
             _normalize_core_evidence_count_text(

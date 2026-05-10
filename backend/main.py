@@ -38,8 +38,8 @@ app.add_middleware(
 # ---- Initialize services ----
 llm_client = None
 try:
-    from openai import OpenAI
-    llm_client = OpenAI(
+    from openai import AsyncOpenAI
+    llm_client = AsyncOpenAI(
         api_key=config.LLM_API_KEY,
         base_url=config.LLM_BASE_URL
     )
@@ -67,7 +67,7 @@ app.include_router(evidence_router)
 app.include_router(validation_router)
 
 
-BUILD_MARKER = "core-evidence-refilter-746ef4d"
+BUILD_MARKER = "stream-await-fix-20260510"
 
 
 # ---- Static routes ----
