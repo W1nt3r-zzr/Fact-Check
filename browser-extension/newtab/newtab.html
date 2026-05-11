@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI信息核查助手</title>
+  <link rel="stylesheet" href="../popup/popup.css">
+  <link rel="stylesheet" href="newtab.css">
+</head>
+<body class="newtab-page">
+  <main class="newtab-shell">
+    <div class="container newtab-container">
+      <header class="header">
+        <h1 class="title">AI信息核查</h1>
+        <p class="subtitle">输入或粘贴内容，直接开始核查</p>
+      </header>
+
+      <section id="updateNotice" class="update-notice hidden" aria-live="polite"></section>
+
+      <section class="input-section">
+        <div class="section-title">待核查内容</div>
+        <textarea id="claimText" class="claim-text empty" rows="5" placeholder="输入要核查的内容..."></textarea>
+        <div class="input-tip">包含具体的时间、地点、人物等信息，核查效果更准确</div>
+      </section>
+
+      <section class="action-section">
+        <button id="checkBtn" class="btn-primary" disabled>开始核查</button>
+        <button id="clearBtn" class="btn-secondary">清空</button>
+      </section>
+
+      <div id="progressArea" class="progress-area hidden">
+        <div class="progress-bar"><div id="progressFill" class="progress-fill"></div></div>
+        <p id="progressText" class="progress-text">正在核查中...</p>
+      </div>
+
+      <div id="resultArea" class="result-area hidden"></div>
+
+      <div id="errorArea" class="error-area hidden">
+        <p id="errorText" class="error-text"></p>
+      </div>
+
+      <footer class="footer">
+        <p class="footer-text">由 DeepSeek 驱动</p>
+      </footer>
+    </div>
+  </main>
+
+  <button id="ai-check-newtab-entry" class="newtab-entry" type="button" title="AI信息核查" aria-label="AI信息核查">
+    <span class="newtab-entry-mark">核</span>
+  </button>
+
+  <script src="../config.js"></script>
+  <script src="../utils/update.js"></script>
+  <script src="../utils/dom.js"></script>
+  <script src="../utils/markdown.js"></script>
+  <script src="../utils/highlight.js"></script>
+  <script src="../popup/popup.js"></script>
+  <script src="newtab.js"></script>
+</body>
+</html>

@@ -8,6 +8,7 @@ GITHUB_REPO="${GITHUB_REPO:-W1nt3r-zzr/Fact-Check}"
 GIT_REMOTE="${GIT_REMOTE:-Fact-Check}"
 BACKEND_QUEUE_URL="${BACKEND_QUEUE_URL:-https://fact-check-production-8d0f.up.railway.app/api/v1/queue-status}"
 GH_BIN="${GH_BIN:-.tools/bin/gh}"
+RELEASE_NOTES_FILE="${RELEASE_NOTES_FILE:-}"
 PUBLISH=0
 
 usage() {
@@ -24,6 +25,7 @@ Environment:
   GIT_REMOTE         default: Fact-Check
   BACKEND_QUEUE_URL  default: Railway queue-status endpoint
   GH_BIN             default: .tools/bin/gh
+  RELEASE_NOTES_FILE optional markdown/text file used for GitHub Release notes
 USAGE
 }
 
@@ -104,6 +106,9 @@ check_required_files() {
     "browser-extension/manifest.json"
     "browser-extension/config.js"
     "browser-extension/background.js"
+    "browser-extension/newtab/newtab.html"
+    "browser-extension/newtab/newtab.css"
+    "browser-extension/newtab/newtab.js"
     "browser-extension/content/content.js"
     "browser-extension/content/content.css"
     "browser-extension/popup/popup.html"
@@ -180,6 +185,9 @@ verify_zip() {
   [[ "$content_css" == *".queue-status"* ]]
   [[ "$zip_entries" == *"utils/markdown.js"* ]]
   [[ "$zip_entries" == *"utils/highlight.js"* ]]
+  [[ "$zip_entries" == *"newtab/newtab.html"* ]]
+  [[ "$zip_entries" == *"newtab/newtab.css"* ]]
+  [[ "$zip_entries" == *"newtab/newtab.js"* ]]
   echo "zip queue-status frontend ok"
 }
 
@@ -189,6 +197,11 @@ commit_and_publish() {
 
   if [[ ! -x "$GH_BIN" ]]; then
     echo "GitHub CLI not found or not executable: $GH_BIN" >&2
+    exit 1
+  fi
+
+  if [[ -n "$RELEASE_NOTES_FILE" && ! -f "$RELEASE_NOTES_FILE" ]]; then
+    echo "Release notes file not found: $RELEASE_NOTES_FILE" >&2
     exit 1
   fi
 
@@ -227,10 +240,17 @@ commit_and_publish() {
   git push "$GIT_REMOTE" "$TAG"
 
   section "Creating GitHub Release"
+  local notes_args
+  if [[ -n "$RELEASE_NOTES_FILE" ]]; then
+    notes_args=(--notes-file "$RELEASE_NOTES_FILE")
+  else
+    notes_args=(--notes "发布 browser-extension $TAG。请在发布前通过 RELEASE_NOTES_FILE 提供本次修改、修复和更新内容。")
+  fi
+
   "$GH_BIN" release create "$TAG" "$ZIP_PATH" \
     --repo "$GITHUB_REPO" \
     --title "AI信息核查助手 $TAG" \
-    --notes "同步发布 browser-extension $TAG 与后端队列状态支持。" \
+    "${notes_args[@]}" \
     --latest
 
   section "Waiting for Railway queue endpoint"

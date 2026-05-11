@@ -20,6 +20,13 @@ const popupStyles = fs.readFileSync(
   path.join(__dirname, '../popup/popup.css'),
   'utf8',
 );
+const manifest = JSON.parse(fs.readFileSync(
+  path.join(__dirname, '../manifest.json'),
+  'utf8',
+));
+const newtabHtmlPath = path.join(__dirname, '../newtab/newtab.html');
+const newtabStylesPath = path.join(__dirname, '../newtab/newtab.css');
+const newtabScriptPath = path.join(__dirname, '../newtab/newtab.js');
 
 test('content script does not shadow global window in openCheckWindow', () => {
   assert.doesNotMatch(contentScript, /const\s+window\s*=\s*document\.createElement/);
@@ -39,6 +46,22 @@ test('floating entry is kept visible without requiring text selection', () => {
   assert.match(contentScript, /window\.addEventListener\('pageshow', ensurePersistentControls/);
   assert.match(contentScript, /window\.addEventListener\('focus', ensurePersistentControls/);
   assert.doesNotMatch(contentScript, /selectedText[\s\S]{0,120}createFloatingButton/);
+});
+
+test('default browser new tab is replaced with an extension page that shows the check entry', () => {
+  assert.equal(manifest.chrome_url_overrides?.newtab, 'newtab/newtab.html');
+  assert.ok(fs.existsSync(newtabHtmlPath));
+  assert.ok(fs.existsSync(newtabStylesPath));
+  assert.ok(fs.existsSync(newtabScriptPath));
+
+  const newtabHtml = fs.readFileSync(newtabHtmlPath, 'utf8');
+  const newtabStyles = fs.readFileSync(newtabStylesPath, 'utf8');
+  const newtabScript = fs.readFileSync(newtabScriptPath, 'utf8');
+
+  assert.match(newtabHtml, /id="ai-check-newtab-entry"/);
+  assert.match(newtabHtml, /popup\/popup\.js/);
+  assert.match(newtabStyles, /position:\s*fixed/);
+  assert.match(newtabScript, /claimText\.focus\(\)/);
 });
 
 test('popup check button has an in-flight request guard', () => {
@@ -127,7 +150,8 @@ test('completed result collapse does not reopen running progress', () => {
 
 test('AI summary detail uses unified markdown layout', () => {
   assert.match(contentScript, /function normalizeAISummaryMarkdown/);
-  assert.match(contentScript, /renderLazyMarkdownDetail\(fullEl,\s*normalizeAISummaryMarkdown\(summaryFull\)\)/);
+  assert.match(contentScript, /summaryDetailMarkdown = normalizeAISummaryMarkdown\(summaryFull\)/);
+  assert.match(contentScript, /renderLazyMarkdownDetail\(fullEl,\s*summaryDetailMarkdown\)/);
   assert.match(contentStyles, /hero-summary-full \.markdown-content \.md-h2/);
   assert.match(contentStyles, /hero-summary-full \.markdown-content \.md-p/);
   assert.match(contentStyles, /hero-summary-full \.markdown-content \.md-li/);
@@ -137,12 +161,17 @@ test('AI summary detail uses unified markdown layout', () => {
 test('full summary and reasoning details are rendered only after expand click', () => {
   assert.match(contentScript, /function renderLazyMarkdownDetail/);
   assert.match(contentScript, /fullEl\.dataset\.rendered = 'true'/);
-  assert.match(contentScript, /renderLazyMarkdownDetail\(fullEl,\s*reasoningDisplayContent\)/);
+  assert.match(contentScript, /let summaryDetailMarkdown = ''/);
+  assert.match(contentScript, /let reasoningDetailMarkdown = ''/);
+  assert.match(contentScript, /renderLazyMarkdownDetail\(fullEl,\s*summaryDetailMarkdown\)/);
+  assert.match(contentScript, /renderLazyMarkdownDetail\(fullEl,\s*reasoningDetailMarkdown\)/);
   assert.doesNotMatch(contentScript, /<div class="hero-summary-full markdown-content" id="heroSummaryFull" style="display:none">\s*\$\{summaryDetailHtml\}/);
   assert.doesNotMatch(contentScript, /<div class="reasoning-full markdown-content" id="reasoningFull" style="display:none">\s*\$\{parseMarkdown\(reasoningDisplayContent\)\}/);
   assert.match(popupScript, /function renderLazyMarkdownDetail/);
-  assert.match(popupScript, /renderLazyMarkdownDetail\(fullEl,\s*full\)/);
-  assert.match(popupScript, /renderLazyMarkdownDetail\(fullEl,\s*reasoningDisplayContent\)/);
+  assert.match(popupScript, /let summaryDetailMarkdown = ''/);
+  assert.match(popupScript, /let reasoningDetailMarkdown = ''/);
+  assert.match(popupScript, /renderLazyMarkdownDetail\(fullEl,\s*summaryDetailMarkdown\)/);
+  assert.match(popupScript, /renderLazyMarkdownDetail\(fullEl,\s*reasoningDetailMarkdown\)/);
 });
 
 test('live draft output is visually demoted before the final report', () => {
@@ -152,7 +181,10 @@ test('live draft output is visually demoted before the final report', () => {
   assert.match(contentScript, /function scrollStreamingDraftToBottom/);
   assert.match(contentScript, /requestAnimationFrame/);
   assert.match(contentScript, /streaming-card-scroll-anchor/);
-  assert.match(contentScript, /scrollIntoView/);
+  const scrollBlock = contentScript.match(/function scrollStreamingDraftToBottom\(container\) \{[\s\S]*?\n\}/)?.[0] || '';
+  assert.match(scrollBlock, /body\.scrollTop = body\.scrollHeight/);
+  assert.doesNotMatch(scrollBlock, /container\.scrollTop/);
+  assert.doesNotMatch(scrollBlock, /scrollIntoView/);
 
   const draftCardBlock = contentStyles.match(/\.streaming-card--draft \{[\s\S]*?\n\}/)?.[0] || '';
   const draftHeaderBlock = contentStyles.match(/\.streaming-card--draft \.streaming-card-header \{[\s\S]*?\n\}/)?.[0] || '';

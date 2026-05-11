@@ -1,0 +1,108 @@
+.newtab-page {
+  min-height: 100vh;
+  background: #f5f7fb;
+}
+
+.newtab-shell {
+  min-height: 100vh;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: clamp(32px, 7vh, 72px) 20px 48px;
+}
+
+.newtab-container {
+  width: min(760px, calc(100vw - 40px));
+  max-height: none;
+  overflow: visible;
+  padding: clamp(22px, 4vw, 34px);
+  border: 1px solid #dce3ee;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 20px 60px rgba(32, 45, 64, 0.12);
+}
+
+.newtab-container .header {
+  text-align: left;
+}
+
+.newtab-container .title {
+  font-size: 26px;
+}
+
+.newtab-container .subtitle,
+.newtab-container .section-title,
+.newtab-container .input-tip,
+.newtab-container button,
+.newtab-container .progress-text,
+.newtab-container .tab-item,
+.newtab-container .evidence-retrieval-info,
+.newtab-container .stat-card .stat-label {
+  font-size: 15px;
+}
+
+.newtab-container .claim-text {
+  min-height: clamp(120px, 24vh, 210px);
+  max-height: min(38vh, 320px);
+}
+
+.newtab-entry {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 10;
+  width: 56px;
+  height: 56px;
+  min-width: 56px;
+  flex: none;
+  padding: 0;
+  border: 1px solid rgba(36, 88, 166, 0.24);
+  border-radius: 50%;
+  background: #2458a6;
+  color: #ffffff;
+  box-shadow: 0 14px 34px rgba(36, 88, 166, 0.28);
+}
+
+.newtab-entry:hover {
+  background: #1f4a8c;
+  transform: translateY(-1px);
+}
+
+.newtab-entry-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  font-size: 20px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.newtab-entry-pulse {
+  outline: 4px solid rgba(36, 88, 166, 0.16);
+}
+
+@media (max-width: 560px) {
+  .newtab-shell {
+    padding: 18px 12px 88px;
+  }
+
+  .newtab-container {
+    width: 100%;
+    padding: 18px;
+  }
+
+  .newtab-container .action-section {
+    flex-direction: column;
+  }
+
+  .newtab-container .btn-secondary {
+    width: 100%;
+  }
+
+  .newtab-entry {
+    right: 16px;
+    bottom: 16px;
+  }
+}

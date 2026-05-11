@@ -986,15 +986,8 @@ function scrollStreamingDraftToBottom(container) {
   if (!container) return;
   requestAnimationFrame(() => {
     const body = container.querySelector('.streaming-card-body');
-    const anchor = container.querySelector('.streaming-card-scroll-anchor');
     if (body) {
       body.scrollTop = body.scrollHeight;
-    }
-    if (container) {
-      container.scrollTop = container.scrollHeight;
-    }
-    if (anchor) {
-      anchor.scrollIntoView({ block: 'end', inline: 'nearest' });
     }
   });
 }
@@ -1061,6 +1054,8 @@ function displayResult(data, originalClaim) {
   }
 
   let html = '';
+  let summaryDetailMarkdown = '';
+  let reasoningDetailMarkdown = '';
 
   // === 1. AI归纳总结 Hero 卡片 ===
   if (data.evidence_chain && data.evidence_chain.ai_summary) {
@@ -1079,6 +1074,7 @@ function displayResult(data, originalClaim) {
       // 去掉开头的换行和标点
       summaryFull = summaryFull.replace(/^[\n\r\s，,。.、]+/, '');
     }
+    summaryDetailMarkdown = normalizeAISummaryMarkdown(summaryFull);
 
     html += `
       <div class="analysis-panel hero-summary">
@@ -1180,6 +1176,7 @@ function displayResult(data, originalClaim) {
 
   if (reasoningContent) {
     const reasoningDisplayContent = buildReasoningDisplayContent(reasoningContent);
+    reasoningDetailMarkdown = reasoningDisplayContent;
 
     html += `
       <div class="reasoning-panel">
@@ -1219,7 +1216,7 @@ function displayResult(data, originalClaim) {
     heroExpandBtn.addEventListener('click', () => {
       const fullEl = document.getElementById('heroSummaryFull');
       if (fullEl.style.display === 'none') {
-        renderLazyMarkdownDetail(fullEl, normalizeAISummaryMarkdown(summaryFull));
+        renderLazyMarkdownDetail(fullEl, summaryDetailMarkdown);
         fullEl.style.display = 'block';
         heroExpandBtn.textContent = '收起详细分析 ▲';
       } else {
@@ -1235,7 +1232,7 @@ function displayResult(data, originalClaim) {
     reasoningExpandBtn.addEventListener('click', () => {
       const fullEl = document.getElementById('reasoningFull');
       if (fullEl.style.display === 'none') {
-        renderLazyMarkdownDetail(fullEl, reasoningDisplayContent);
+        renderLazyMarkdownDetail(fullEl, reasoningDetailMarkdown);
         fullEl.style.display = 'block';
         reasoningExpandBtn.textContent = '收起引用、关系与局限 ▲';
       } else {

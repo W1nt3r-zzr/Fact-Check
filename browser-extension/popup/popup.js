@@ -221,6 +221,8 @@ async function handleCheck() {
 
 function displayPopupResult(data) {
   let html = '';
+  let summaryDetailMarkdown = '';
+  let reasoningDetailMarkdown = '';
 
   // Hero AI Summary
   if (data.evidence_chain && data.evidence_chain.ai_summary) {
@@ -236,6 +238,7 @@ function displayPopupResult(data) {
     if (full && brief && full.startsWith(brief)) {
       full = full.substring(brief.length).trim().replace(/^[\n\r\s，,。.、]+/, '');
     }
+    summaryDetailMarkdown = full;
     html += `<div class="analysis-panel hero-summary">
       <div class="analysis-panel-header">
         <div>
@@ -316,6 +319,7 @@ function displayPopupResult(data) {
   html += `<div class="tab-content" id="tab-reasoning" style="display:none">`;
   if (data.reasoning) {
     const reasoningDisplayContent = buildPopupReasoningDisplayContent(data.reasoning);
+    reasoningDetailMarkdown = reasoningDisplayContent;
     html += `
       <div class="reasoning-panel">
         <div class="analysis-panel-header">
@@ -344,7 +348,7 @@ function displayPopupResult(data) {
     heroExpandBtn.addEventListener('click', () => {
       const fullEl = document.getElementById('heroSummaryFull');
       if (fullEl.style.display === 'none') {
-        renderLazyMarkdownDetail(fullEl, full);
+        renderLazyMarkdownDetail(fullEl, summaryDetailMarkdown);
         fullEl.style.display = 'block';
         heroExpandBtn.textContent = '收起详细分析 ▲';
       } else {
@@ -360,7 +364,7 @@ function displayPopupResult(data) {
     reasoningExpandBtn.addEventListener('click', () => {
       const fullEl = document.getElementById('reasoningFull');
       if (fullEl.style.display === 'none') {
-        renderLazyMarkdownDetail(fullEl, reasoningDisplayContent);
+        renderLazyMarkdownDetail(fullEl, reasoningDetailMarkdown);
         fullEl.style.display = 'block';
         reasoningExpandBtn.textContent = '收起引用、关系与局限 ▲';
       } else {
