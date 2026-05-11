@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AI信息核查助手",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "基于DeepSeek的智能信息核查工具，帮你快速验证网络信息的真实性",
 
   "permissions": [

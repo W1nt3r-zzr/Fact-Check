@@ -32,6 +32,15 @@ test('content stream check has an in-flight request guard', () => {
   assert.match(contentScript, /已有核查任务正在进行/);
 });
 
+test('floating entry is kept visible without requiring text selection', () => {
+  assert.match(contentScript, /function ensurePersistentControls/);
+  assert.match(contentScript, /document\.getElementById\('ai-check-float-btn'\)/);
+  assert.match(contentScript, /setInterval\(ensurePersistentControls/);
+  assert.match(contentScript, /window\.addEventListener\('pageshow', ensurePersistentControls/);
+  assert.match(contentScript, /window\.addEventListener\('focus', ensurePersistentControls/);
+  assert.doesNotMatch(contentScript, /selectedText[\s\S]{0,120}createFloatingButton/);
+});
+
 test('popup check button has an in-flight request guard', () => {
   assert.match(popupScript, /popupCheckRunning/);
   assert.match(popupScript, /if \(popupCheckRunning\) return/);
@@ -46,6 +55,20 @@ test('claim text can be edited before starting a check', () => {
   assert.match(contentScript, /function getCurrentModalClaim/);
   assert.match(contentScript, /performCheckRealStream\(claim, false\)/);
   assert.match(contentStyles, /\.ai-check-text:focus/);
+});
+
+test('modal claim input adapts to narrow and short screens', () => {
+  const containerBlock = contentStyles.match(/\.ai-check-window-container \{[\s\S]*?\n\}/)?.[0] || '';
+  const bodyBlock = contentStyles.match(/\.ai-check-window-body \{[\s\S]*?\n\}/)?.[0] || '';
+  const textBlock = contentStyles.match(/\.ai-check-text \{[\s\S]*?\n\}/)?.[0] || '';
+
+  assert.match(containerBlock, /width:\s*min\(640px,\s*calc\(100vw - 32px\)\)/);
+  assert.match(containerBlock, /max-height:\s*min\(88vh,\s*760px\)/);
+  assert.match(bodyBlock, /padding:\s*clamp\(16px,\s*4vw,\s*28px\)/);
+  assert.match(textBlock, /min-height:\s*clamp\(84px,\s*18vh,\s*140px\)/);
+  assert.match(textBlock, /max-height:\s*min\(28vh,\s*220px\)/);
+  assert.match(contentStyles, /@media \(max-width:\s*520px\)/);
+  assert.match(contentStyles, /@media \(max-height:\s*640px\)/);
 });
 
 test('fetch network errors include the configured API base', () => {
@@ -104,11 +127,22 @@ test('completed result collapse does not reopen running progress', () => {
 
 test('AI summary detail uses unified markdown layout', () => {
   assert.match(contentScript, /function normalizeAISummaryMarkdown/);
-  assert.match(contentScript, /parseMarkdown\(normalizeAISummaryMarkdown\(summaryFull\)\)/);
+  assert.match(contentScript, /renderLazyMarkdownDetail\(fullEl,\s*normalizeAISummaryMarkdown\(summaryFull\)\)/);
   assert.match(contentStyles, /hero-summary-full \.markdown-content \.md-h2/);
   assert.match(contentStyles, /hero-summary-full \.markdown-content \.md-p/);
   assert.match(contentStyles, /hero-summary-full \.markdown-content \.md-li/);
   assert.match(contentStyles, /hero-summary-full > \.markdown-content/);
+});
+
+test('full summary and reasoning details are rendered only after expand click', () => {
+  assert.match(contentScript, /function renderLazyMarkdownDetail/);
+  assert.match(contentScript, /fullEl\.dataset\.rendered = 'true'/);
+  assert.match(contentScript, /renderLazyMarkdownDetail\(fullEl,\s*reasoningDisplayContent\)/);
+  assert.doesNotMatch(contentScript, /<div class="hero-summary-full markdown-content" id="heroSummaryFull" style="display:none">\s*\$\{summaryDetailHtml\}/);
+  assert.doesNotMatch(contentScript, /<div class="reasoning-full markdown-content" id="reasoningFull" style="display:none">\s*\$\{parseMarkdown\(reasoningDisplayContent\)\}/);
+  assert.match(popupScript, /function renderLazyMarkdownDetail/);
+  assert.match(popupScript, /renderLazyMarkdownDetail\(fullEl,\s*full\)/);
+  assert.match(popupScript, /renderLazyMarkdownDetail\(fullEl,\s*reasoningDisplayContent\)/);
 });
 
 test('live draft output is visually demoted before the final report', () => {
@@ -116,6 +150,9 @@ test('live draft output is visually demoted before the final report', () => {
   assert.match(contentScript, /生成中 · 草稿分析/);
   assert.match(contentScript, /最终以正式报告为准/);
   assert.match(contentScript, /function scrollStreamingDraftToBottom/);
+  assert.match(contentScript, /requestAnimationFrame/);
+  assert.match(contentScript, /streaming-card-scroll-anchor/);
+  assert.match(contentScript, /scrollIntoView/);
 
   const draftCardBlock = contentStyles.match(/\.streaming-card--draft \{[\s\S]*?\n\}/)?.[0] || '';
   const draftHeaderBlock = contentStyles.match(/\.streaming-card--draft \.streaming-card-header \{[\s\S]*?\n\}/)?.[0] || '';
@@ -171,6 +208,12 @@ test('history allows repeated claims as separate records', () => {
   assert.doesNotMatch(saveHistoryBlock, /findIndex\(i => i\.claim === claim\)/);
   assert.doesNotMatch(saveHistoryBlock, /splice\(existingIdx,\s*1\)/);
   assert.match(saveHistoryBlock, /items\.unshift\(historyItem\)/);
+});
+
+test('history save handles storage quota pressure explicitly', () => {
+  assert.match(contentScript, /function pruneHistoryForStorage/);
+  assert.match(contentScript, /chrome\.runtime\?\.lastError/);
+  assert.match(contentScript, /factcheck_history:\s*prunedItems/);
 });
 
 test('collapsing a reopened history result does not create another history item', () => {

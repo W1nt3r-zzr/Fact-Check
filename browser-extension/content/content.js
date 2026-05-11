@@ -796,7 +796,7 @@ async function performCheckRealStream(text, enable_thinking = false) {
                     <span>生成中 · 草稿分析</span>
                     <small>最终以正式报告为准</small>
                   </div>
-                  <div class="streaming-card-body">${simpleMarkdownRender(stream.thinkingContent)}</div>
+                  <div class="streaming-card-body">${simpleMarkdownRender(stream.thinkingContent)}<span class="streaming-card-scroll-anchor"></span></div>
                 </div>`;
                 scrollStreamingDraftToBottom(thinkingEl);
               }
@@ -820,7 +820,7 @@ async function performCheckRealStream(text, enable_thinking = false) {
                       <span>生成中 · 报告草稿</span>
                       <small>完成后会整理为正式报告</small>
                     </div>
-                    <div class="streaming-card-body">${simpleMarkdownRender(stream.fullContent)}</div>
+                    <div class="streaming-card-body">${simpleMarkdownRender(stream.fullContent)}<span class="streaming-card-scroll-anchor"></span></div>
                   </div>`;
                   scrollStreamingDraftToBottom(thinkingEl);
                 }
@@ -983,12 +983,26 @@ function displayTextForMarkdownLink(linkText) {
 }
 
 function scrollStreamingDraftToBottom(container) {
-  const body = container?.querySelector('.streaming-card-body');
-  if (body) {
-    body.scrollTop = body.scrollHeight;
-  } else if (container) {
-    container.scrollTop = container.scrollHeight;
-  }
+  if (!container) return;
+  requestAnimationFrame(() => {
+    const body = container.querySelector('.streaming-card-body');
+    const anchor = container.querySelector('.streaming-card-scroll-anchor');
+    if (body) {
+      body.scrollTop = body.scrollHeight;
+    }
+    if (container) {
+      container.scrollTop = container.scrollHeight;
+    }
+    if (anchor) {
+      anchor.scrollIntoView({ block: 'end', inline: 'nearest' });
+    }
+  });
+}
+
+function renderLazyMarkdownDetail(fullEl, markdown) {
+  if (!fullEl || fullEl.dataset.rendered === 'true') return;
+  fullEl.innerHTML = parseMarkdown(markdown || '');
+  fullEl.dataset.rendered = 'true';
 }
 
 
@@ -1066,8 +1080,6 @@ function displayResult(data, originalClaim) {
       summaryFull = summaryFull.replace(/^[\n\r\s，,。.、]+/, '');
     }
 
-    const summaryDetailHtml = summaryFull ? parseMarkdown(normalizeAISummaryMarkdown(summaryFull)) : '';
-
     html += `
       <div class="analysis-panel hero-summary">
         <div class="analysis-panel-header">
@@ -1081,7 +1093,6 @@ function displayResult(data, originalClaim) {
         ${summaryFull && summaryFull.length > 10 ? `
           <button class="hero-expand-btn analysis-expand-btn" id="heroSummaryExpand">展开详细分析 ▼</button>
           <div class="hero-summary-full markdown-content" id="heroSummaryFull" style="display:none">
-            ${summaryDetailHtml}
           </div>
         ` : ''}
       </div>
@@ -1182,7 +1193,6 @@ function displayResult(data, originalClaim) {
         <div class="reasoning-brief">${renderInlineMarkdown(reasoningBrief)}</div>
         <button class="hero-expand-btn analysis-expand-btn" id="reasoningExpand">展开引用、关系与局限 ▼</button>
         <div class="reasoning-full markdown-content" id="reasoningFull" style="display:none">
-          ${parseMarkdown(reasoningDisplayContent)}
         </div>
       </div>
     `;
@@ -1209,6 +1219,7 @@ function displayResult(data, originalClaim) {
     heroExpandBtn.addEventListener('click', () => {
       const fullEl = document.getElementById('heroSummaryFull');
       if (fullEl.style.display === 'none') {
+        renderLazyMarkdownDetail(fullEl, normalizeAISummaryMarkdown(summaryFull));
         fullEl.style.display = 'block';
         heroExpandBtn.textContent = '收起详细分析 ▲';
       } else {
@@ -1224,6 +1235,7 @@ function displayResult(data, originalClaim) {
     reasoningExpandBtn.addEventListener('click', () => {
       const fullEl = document.getElementById('reasoningFull');
       if (fullEl.style.display === 'none') {
+        renderLazyMarkdownDetail(fullEl, reasoningDisplayContent);
         fullEl.style.display = 'block';
         reasoningExpandBtn.textContent = '收起引用、关系与局限 ▲';
       } else {
@@ -2459,7 +2471,7 @@ function reopenCheckFromSidebar(claim) {
             <span>${header}</span>
             <small>最终以正式报告为准</small>
           </div>
-          <div class="streaming-card-body">${simpleMarkdownRender(content)}</div>
+          <div class="streaming-card-body">${simpleMarkdownRender(content)}<span class="streaming-card-scroll-anchor"></span></div>
         </div>`;
         scrollStreamingDraftToBottom(thinkingEl);
       }
@@ -2809,6 +2821,42 @@ function deleteHistoryItem(id) {
   });
 }
 
+function pruneHistoryResultForStorage(result) {
+  if (!result || typeof result !== 'object') return result;
+  const pruned = JSON.parse(JSON.stringify(result));
+  if (pruned.thinking_process && pruned.thinking_process.length > 2000) {
+    pruned.thinking_process = pruned.thinking_process.slice(0, 2000) + '...';
+  }
+  if (pruned.reasoning && pruned.reasoning.length > 12000) {
+    pruned.reasoning = pruned.reasoning.slice(0, 12000) + '...';
+  }
+  if (pruned.evidence_chain?.ai_summary && pruned.evidence_chain.ai_summary.length > 8000) {
+    pruned.evidence_chain.ai_summary = pruned.evidence_chain.ai_summary.slice(0, 8000) + '...';
+  }
+  return pruned;
+}
+
+function pruneHistoryForStorage(items, limit = 30) {
+  return items.slice(0, limit).map((item) => ({
+    ...item,
+    result: pruneHistoryResultForStorage(item.result)
+  }));
+}
+
+function renderSavedHistory(items) {
+  const list = document.getElementById('sidebarHistoryList');
+  if (list) {
+    renderHistoryList(items);
+  }
+  updateSidebarToggle();
+
+  // 移除完成通知，避免和历史列表重复显示同一核查
+  const doneNotice = document.querySelector('.sidebar-progress-item-done');
+  if (doneNotice) {
+    doneNotice.remove();
+  }
+}
+
 function saveToHistory(claim, result) {
   const verdict = result.evidence_chain?.conclusion || result.verdict || '无法判断';
   const id = `${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
@@ -2829,25 +2877,23 @@ function saveToHistory(claim, result) {
 
   loadHistory().then(items => {
     items.unshift(historyItem);
+    const prunedItems = pruneHistoryForStorage(items);
 
-    // 最多保留 50 条
-    if (items.length > 50) {
-      items = items.slice(0, 50);
-    }
-
-    chrome.storage.local.set({ factcheck_history: items }, () => {
-      // 如果侧边栏可见，刷新列表
-      const list = document.getElementById('sidebarHistoryList');
-      if (list) {
-        renderHistoryList(items);
+    chrome.storage.local.set({ factcheck_history: prunedItems }, () => {
+      if (chrome.runtime?.lastError) {
+        console.warn('保存核查历史失败，尝试减少历史数量:', chrome.runtime.lastError.message);
+        const compactItems = pruneHistoryForStorage(items, 10);
+        chrome.storage.local.set({ factcheck_history: compactItems }, () => {
+          if (chrome.runtime?.lastError) {
+            console.error('保存核查历史失败:', chrome.runtime.lastError.message);
+            showToast('核查完成，但历史记录空间不足，未能保存');
+            return;
+          }
+          renderSavedHistory(compactItems);
+        });
+        return;
       }
-      updateSidebarToggle();
-
-      // 移除完成通知，避免和历史列表重复显示同一核查
-      const doneNotice = document.querySelector('.sidebar-progress-item-done');
-      if (doneNotice) {
-        doneNotice.remove();
-      }
+      renderSavedHistory(prunedItems);
     });
   });
 }
@@ -2866,14 +2912,32 @@ function loadHistory() {
 
 
 // ==================== 页面加载完成后创建按钮 ====================
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', () => {
+function ensurePersistentControls() {
+  if (!document.body) return;
+
+  if (!document.getElementById('ai-check-float-btn')) {
     createFloatingButton();
+  }
+
+  if (!document.getElementById('ai-check-sidebar-toggle') && !document.getElementById('ai-check-sidebar')) {
     createSidebarToggle();
-  });
+  }
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', ensurePersistentControls);
 } else {
-  createFloatingButton();
-  createSidebarToggle();
+  ensurePersistentControls();
+}
+
+if (window.addEventListener) {
+  window.addEventListener('pageshow', ensurePersistentControls);
+  window.addEventListener('focus', ensurePersistentControls);
+}
+document.addEventListener('visibilitychange', ensurePersistentControls);
+if (typeof setInterval === 'function') {
+  const persistentControlsTimer = setInterval(ensurePersistentControls, 2000);
+  if (persistentControlsTimer?.unref) persistentControlsTimer.unref();
 }
 
 // ==================== 监听来自Popup的消息 ====================

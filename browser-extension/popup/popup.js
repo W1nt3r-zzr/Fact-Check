@@ -247,7 +247,7 @@ function displayPopupResult(data) {
       <div class="hero-summary-brief analysis-brief">${escapeHtml(brief)}</div>
       ${full && full.length > 10 ? `
         <button class="hero-expand-btn analysis-expand-btn" id="heroSummaryExpand">展开详细分析 ▼</button>
-        <div class="hero-summary-full markdown-content" id="heroSummaryFull" style="display:none">${parseMarkdown(full)}</div>
+        <div class="hero-summary-full markdown-content" id="heroSummaryFull" style="display:none"></div>
       ` : ''}
     </div>`;
   }
@@ -327,7 +327,7 @@ function displayPopupResult(data) {
         </div>
         <div class="reasoning-brief">${escapeHtml(reasoningBrief)}</div>
         <button class="hero-expand-btn analysis-expand-btn" id="reasoningExpand">展开引用、关系与局限 ▼</button>
-        <div class="reasoning-full markdown-content" id="reasoningFull" style="display:none">${parseMarkdown(reasoningDisplayContent)}</div>
+        <div class="reasoning-full markdown-content" id="reasoningFull" style="display:none"></div>
       </div>
     `;
   } else {
@@ -344,6 +344,7 @@ function displayPopupResult(data) {
     heroExpandBtn.addEventListener('click', () => {
       const fullEl = document.getElementById('heroSummaryFull');
       if (fullEl.style.display === 'none') {
+        renderLazyMarkdownDetail(fullEl, full);
         fullEl.style.display = 'block';
         heroExpandBtn.textContent = '收起详细分析 ▲';
       } else {
@@ -359,6 +360,7 @@ function displayPopupResult(data) {
     reasoningExpandBtn.addEventListener('click', () => {
       const fullEl = document.getElementById('reasoningFull');
       if (fullEl.style.display === 'none') {
+        renderLazyMarkdownDetail(fullEl, reasoningDisplayContent);
         fullEl.style.display = 'block';
         reasoningExpandBtn.textContent = '收起引用、关系与局限 ▲';
       } else {
@@ -402,6 +404,12 @@ function stripPopupEvidenceCountLead(text) {
   return String(text || '')
     .replace(/^共检索到\d+条证据，覆盖\d+个不同域名来源。\s*/u, '')
     .trim();
+}
+
+function renderLazyMarkdownDetail(fullEl, markdown) {
+  if (!fullEl || fullEl.dataset.rendered === 'true') return;
+  fullEl.innerHTML = parseMarkdown(markdown || '');
+  fullEl.dataset.rendered = 'true';
 }
 
 function renderCard(evidence, type) {

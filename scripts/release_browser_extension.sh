@@ -218,7 +218,7 @@ commit_and_publish() {
   if git diff --cached --quiet; then
     echo "No staged changes to commit."
   else
-    git commit -m "Release browser extension $TAG"
+    git commit -m "发布浏览器插件 $TAG"
   fi
 
   section "Tagging and pushing"
