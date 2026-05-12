@@ -21,7 +21,6 @@ class FactCheckResponse(BaseModel):
     search_keywords: str = Field(..., description="搜索关键词")
     uncertainty_note: str = Field(..., description="不确定性说明")
     reasoning: str = Field(..., description="推理过程说明")
-    confidence: Optional[float] = Field(None, description="置信度（0-100）")
     thinking_process: Optional[str] = Field(None, description="深度思考过程（如果启用）")
     link_validation: Optional[Dict[str, Any]] = Field(None, description="链接活性检测结果")
     consistency_score: Optional[Dict[str, Any]] = Field(None, description="一致性评分结果")

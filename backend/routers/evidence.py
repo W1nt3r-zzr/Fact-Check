@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException
 
 from config import logger
 from models import EvidenceChainRequest
-from services.search import search_with_zhipu
+from services.search import search_evidence
 
 router = APIRouter()
 
@@ -26,14 +26,13 @@ async def generate_evidence_chain(request: EvidenceChainRequest):
         logger.info(f"开始生成证据链: {request.claim}")
         logger.info(f"配置 - 链接验证: {request.enable_link_validation}, Top K: {request.top_k}")
 
-        search_results = await search_with_zhipu(request.claim)
+        search_results = await search_evidence(request.claim)
 
         if not search_results:
             logger.warning("未找到有效搜索结果")
             return {
                 "claim": request.claim,
                 "verdict": "信息不足，无法判断",
-                "confidence": 0.0,
                 "supporting_evidence": [],
                 "opposing_evidence": [],
                 "neutral_evidence": [],
@@ -68,7 +67,6 @@ async def generate_evidence_chain(request: EvidenceChainRequest):
         result = {
             "claim": evidence_chain.claim,
             "verdict": evidence_chain.verdict,
-            "confidence": evidence_chain.confidence,
             "supporting_evidence": evidence_chain.supporting_evidence,
             "opposing_evidence": evidence_chain.opposing_evidence,
             "neutral_evidence": evidence_chain.neutral_evidence,
