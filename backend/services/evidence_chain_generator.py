@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 
 from services.evidence_ranker import EvidenceRanker, RankedEvidence
 from services.link_validator import LinkValidator, LinkValidationResult
+from services.llm_service import sanitize_model_preamble
 from utils.text import STOP_WORDS, extract_keywords
 
 # Optional jieba import with graceful fallback
@@ -32,7 +33,6 @@ class EvidenceHighlight:
     start_index: int  # 在原文中的起始位置
     end_index: int  # 在原文中的结束位置
     highlight_type: str  # 高亮类型：support/opposing/neutral
-    confidence: float  # 置信度 0-1
 
 
 @dataclass
@@ -72,7 +72,6 @@ class EvidenceChain:
     """完整的证据链"""
     claim: str  # 待核查的说法
     verdict: str  # 核查结论
-    confidence: float  # 整体置信度 (0-100)
 
     # 证据链
     supporting_evidence: List[EvidenceChainItem]  # 支持性证据
@@ -88,6 +87,7 @@ class EvidenceChain:
     total_evidence: int  # 总证据数
     total_search_results: int  # 搜索返回的总结果数
     authoritative_sources: int  # 权威来源数
+    unique_domain_count: int  # 独立来源域名数
     average_score: float  # 平均评分
 
     # 元数据
@@ -150,6 +150,18 @@ class EvidenceChainGenerator:
                     urls, concurrent_limit=3
                 )
                 link_validations = {r.url: r for r in validation_results}
+                for ev in ranked_evidences[:top_k]:
+                    validation = link_validations.get(ev.url)
+                    if validation and validation.is_accessible:
+                        if validation.final_url and validation.final_url != ev.url:
+                            ev.url = validation.final_url
+                            # 同步更新域名
+                            try:
+                                ev.domain = urlparse(validation.final_url).netloc.replace('www.', '')
+                            except Exception:
+                                pass
+                    elif validation and not validation.is_accessible:
+                        logger.info(f"链接不可访问但保留证据: {ev.url} ({validation.error_message})")
             except Exception as e:
                 logger.error(f"链接验证失败: {e}")
 
@@ -212,12 +224,16 @@ class EvidenceChainGenerator:
             )
             chain_items.append(item)
 
+        # 步骤5.5: 最终保险去重，避免同一报道在不同栏目进入前端卡片。
+        chain_items = self._deduplicate_chain_items(chain_items)
+
         # 步骤6: 重新分类chain_items（因为我们需要EvidenceChainItem类型）
         supporting_items, opposing_items, neutral_items = self._categorize_chain_items(chain_items, claim)
 
         # 步骤6: 计算统计信息
         authoritative_count = sum(1 for e in chain_items if e.tier == "Tier 1")
         avg_score = sum(e.overall_score for e in chain_items) / len(chain_items) if chain_items else 0
+        unique_domain_count = len(set(e.domain for e in chain_items))
 
         # 步骤7: 生成推理摘要
         reasoning_summary = self._generate_reasoning_summary(claim, chain_items)
@@ -225,8 +241,8 @@ class EvidenceChainGenerator:
         # 步骤8: 提取关键发现
         key_findings = self._extract_key_findings(chain_items)
 
-        # 步骤9: 确定结论和置信度
-        verdict, confidence = self._determine_verdict(chain_items)
+        # 步骤9: 确定结论
+        verdict = self._determine_verdict(chain_items)
 
         # 步骤10: 不确定性说明
         uncertainty_note = self._generate_uncertainty_note(chain_items)
@@ -244,7 +260,6 @@ class EvidenceChainGenerator:
         evidence_chain = EvidenceChain(
             claim=claim,
             verdict=verdict,
-            confidence=confidence,
             supporting_evidence=[self._evidence_to_dict(e) for e in supporting_items],
             opposing_evidence=[self._evidence_to_dict(e) for e in opposing_items],
             neutral_evidence=[self._evidence_to_dict(e) for e in neutral_items],
@@ -255,6 +270,7 @@ class EvidenceChainGenerator:
             total_evidence=len(chain_items),
             total_search_results=total_search_results or len(search_results),
             authoritative_sources=authoritative_count,
+            unique_domain_count=unique_domain_count,
             average_score=round(avg_score, 2),
             generated_at=datetime.now().isoformat(),
             processing_time_ms=round(processing_time, 2)
@@ -263,6 +279,33 @@ class EvidenceChainGenerator:
         logger.info(f"证据链生成完成: {len(chain_items)} 个证据, 耗时: {processing_time:.0}ms")
 
         return evidence_chain
+
+    def _normalize_text_for_dedup(self, text: str) -> str:
+        """规范化文本用于去重：统一空格/标点、去掉末尾常见网站后缀。"""
+        if not text:
+            return ""
+        # 统一空格字符
+        t = text.replace('　', ' ').replace(' ', ' ')
+        # 统一常见全角标点为半角
+        t = t.replace('，', ',').replace('。', '.').replace('！', '!').replace('？', '?')
+        t = t.replace('：', ':').replace('；', ';').replace('“', '"').replace('”', '"')
+        t = t.replace('（', '(').replace('）', ')').replace('【', '[').replace('】', ']')
+        t = t.replace('、', ',').replace('—', '-').replace('–', '-')
+        # 递归去掉末尾常见栏目/站点后缀：
+        # 例如 "-要闻_华商网新闻" 需要先去掉 "_华商网新闻"，再去掉 "-要闻"。
+        suffix_pattern = re.compile(
+            r'\s*[-_|]\s*(?:'
+            r'要闻|社会新闻|社会|新闻|资讯|原创|独家|综合|图片|视频|国内|国际|财经|科技|滚动|热点|专题|频道|客户端|'
+            r'[一-龥a-zA-Z0-9]{2,20}(?:网新闻|新闻网|新闻|网|频道|资讯|要闻)'
+            r')\s*$',
+            flags=re.IGNORECASE
+        )
+        while True:
+            stripped = suffix_pattern.sub('', t).strip()
+            if stripped == t:
+                break
+            t = stripped
+        return t.lower().strip()
 
     def _deduplicate_evidences(
         self,
@@ -273,10 +316,14 @@ class EvidenceChainGenerator:
 
         去重维度：
         1. URL 完全相同（去掉查询参数和锚点）
-        2. 同一域名下标题高度相似（互相包含且长度>=10）
+        2. 同一域名下标题高度相似（规范化后互相包含或完全相等，且长度>=10）
+        3. 跨域名标题高度相似（检测不同网站转载同一报道）
+        4. 同一域名下内容摘要完全重复（同一文章在不同栏目发布，标题不同但内容相同）
         """
         seen_urls: set[str] = set()
         seen_domain_titles: dict[str, set[str]] = {}
+        seen_titles: set[str] = set()  # 用于跨域名转载检测（存储规范化后标题）
+        seen_domain_summaries: dict[str, set[str]] = {}  # 用于摘要重复检测
         result: List[RankedEvidence] = []
 
         for ev in evidences:
@@ -288,26 +335,92 @@ class EvidenceChainGenerator:
                 continue
             seen_urls.add(url_normalized)
 
-            # 2. 同一域名下标题相似去重
+            # 规范化标题
             domain = ev.domain.lower()
-            title_lower = ev.title.lower().strip()
+            title_norm = self._normalize_text_for_dedup(ev.title)
+
+            # 2. 同一域名下标题相似去重
             if domain not in seen_domain_titles:
                 seen_domain_titles[domain] = set()
 
             is_duplicate = False
             for kept_title in seen_domain_titles[domain]:
                 # 互相包含且长度都>=10视为重复
-                if (title_lower in kept_title or kept_title in title_lower) and len(title_lower) >= 10 and len(kept_title) >= 10:
+                if (title_norm in kept_title or kept_title in title_norm) and len(title_norm) >= 10 and len(kept_title) >= 10:
                     logger.info(f"去重：跳过标题相似证据「{ev.title[:50]}...」")
                     is_duplicate = True
                     break
             if is_duplicate:
                 continue
-            seen_domain_titles[domain].add(title_lower)
+            seen_domain_titles[domain].add(title_norm)
+
+            # 3. 跨域名标题相似去重（检测转载/洗稿）
+            # 使用规范化后的标题进行匹配，对细微字符差异更鲁棒
+            is_cross_duplicate = False
+            for kept_norm in seen_titles:
+                # 规范化后完全相等，或互相包含且长度>=10
+                if title_norm == kept_norm:
+                    logger.info(f"去重：跳过跨域名转载证据（标题完全相同）「{ev.title[:50]}...」")
+                    is_cross_duplicate = True
+                    break
+                if (title_norm in kept_norm or kept_norm in title_norm) and len(title_norm) >= 10 and len(kept_norm) >= 10:
+                    logger.info(f"去重：跳过跨域名转载证据（标题相似）「{ev.title[:50]}...」")
+                    is_cross_duplicate = True
+                    break
+            if is_cross_duplicate:
+                continue
+            seen_titles.add(title_norm)
+
+            # 4. 同一域名下内容摘要完全重复检测（同一文章在不同栏目发布，标题不同但内容相同）
+            summary_norm = self._normalize_text_for_dedup(ev.summary)[:200]
+            if summary_norm and len(summary_norm) >= 20:
+                if domain not in seen_domain_summaries:
+                    seen_domain_summaries[domain] = set()
+                if summary_norm in seen_domain_summaries[domain]:
+                    logger.info(f"去重：跳过内容重复证据（同一文章不同栏目）「{ev.title[:50]}...」")
+                    continue
+                seen_domain_summaries[domain].add(summary_norm)
+
             result.append(ev)
 
         if len(result) < len(evidences):
             logger.info(f"证据去重：{len(evidences)} -> {len(result)}")
+        return result
+
+    def _deduplicate_chain_items(self, items: List[EvidenceChainItem]) -> List[EvidenceChainItem]:
+        """Final deduplication pass on UI-facing evidence items."""
+        seen_domain_titles: set[tuple[str, str]] = set()
+        seen_titles: set[str] = set()
+        seen_domain_summaries: set[tuple[str, str]] = set()
+        result: List[EvidenceChainItem] = []
+
+        for item in items:
+            title_norm = self._normalize_text_for_dedup(item.title)
+            summary_norm = re.sub(r'\s+', '', self._normalize_text_for_dedup(item.summary))[:240]
+            domain = item.domain.lower()
+
+            domain_title_key = (domain, title_norm)
+            if title_norm and domain_title_key in seen_domain_titles:
+                logger.info(f"证据链最终去重：跳过同源栏目转载「{item.title[:50]}...」")
+                continue
+            if title_norm and title_norm in seen_titles:
+                logger.info(f"证据链最终去重：跳过跨站同题转载「{item.title[:50]}...」")
+                continue
+
+            domain_summary_key = (domain, summary_norm)
+            if summary_norm and len(summary_norm) >= 80 and domain_summary_key in seen_domain_summaries:
+                logger.info(f"证据链最终去重：跳过同源摘要重复「{item.title[:50]}...」")
+                continue
+
+            if title_norm:
+                seen_domain_titles.add(domain_title_key)
+                seen_titles.add(title_norm)
+            if summary_norm and len(summary_norm) >= 80:
+                seen_domain_summaries.add(domain_summary_key)
+            result.append(item)
+
+        if len(result) < len(items):
+            logger.info(f"证据链最终去重：{len(items)} -> {len(result)}")
         return result
 
     def _categorize_evidences(
@@ -401,7 +514,6 @@ class EvidenceChainGenerator:
                 start_index=start_idx,
                 end_index=end_idx,
                 highlight_type=highlight_type,
-                confidence=evidence.overall_score / 100
             )
             for start_idx, end_idx in selected_spans
         ]
@@ -700,7 +812,6 @@ class EvidenceChainGenerator:
                     "start_index": h.start_index,
                     "end_index": h.end_index,
                     "type": h.highlight_type,
-                    "confidence": h.confidence
                 }
                 for h in evidence.highlights
             ],
@@ -731,7 +842,9 @@ class EvidenceChainGenerator:
         # 平均证据质量
         avg_score = sum(e.overall_score for e in evidences) / total if total else 0
 
-        summary = f"共检索到{total}条证据，来自{unique_domains}个不同来源。"
+        summary = f"共检索到{total}条证据，覆盖{unique_domains}个不同域名来源。"
+        if total >= 3 and unique_domains < total * 0.6:
+            summary += " 其中部分证据可能存在转载或改写关系，证据数量不能直接等同于独立信源数量。"
 
         # 来源质量分析
         source_parts = []
@@ -781,65 +894,32 @@ class EvidenceChainGenerator:
 
         return findings[:3]  # 返回前3个关键发现
 
-    def _determine_verdict(self, evidences: List[EvidenceChainItem]) -> tuple[str, float]:
+    def _determine_verdict(self, evidences: List[EvidenceChainItem]) -> str:
         """
-        确定核查结论和置信度
-
-        新逻辑：基于证据立场（支持/反对/中性）而非评分
+        基于证据立场（支持/反对/中性）确定核查结论。
         """
         if not evidences:
-            return "信息不足，无法判断", 0.0
+            return "信息不足，无法判断"
 
-        # 统计各立场证据数量
         supporting_count = sum(1 for e in evidences if e.stance == "support")
         opposing_count = sum(1 for e in evidences if e.stance == "oppose")
         neutral_count = sum(1 for e in evidences if e.stance == "neutral")
-
-        total_count = len(evidences)
         logger.info(f"证据立场统计 - 支持: {supporting_count}, 反对: {opposing_count}, 中性: {neutral_count}")
 
-        # 计算支持率（支持证据 / (支持+反对)）
         relevant_count = supporting_count + opposing_count
         if relevant_count == 0:
-            # 所有证据都是中性的
             verdict = "证据不足，无法判断"
-            confidence = 30.0
         else:
             support_ratio = supporting_count / relevant_count
-
-            # 根据支持率确定结论
-            if support_ratio >= 0.7:  # 70%以上相关证据支持
+            if support_ratio >= 0.7:
                 verdict = "属实"
-            elif support_ratio <= 0.3:  # 70%以上相关证据反对
+            elif support_ratio <= 0.3:
                 verdict = "不实"
-            else:  # 支持和反对证据比较接近
+            else:
                 verdict = "部分属实，存在争议"
 
-            # 置信度计算
-            # 基础置信度：基于证据数量
-            base_confidence = min(80, total_count * 15)  # 每条证据+15%，最高80分
-
-            # 质量加权：平均信源质量分数
-            avg_score = sum(e.overall_score for e in evidences) / total_count
-            quality_bonus = (avg_score - 50) * 0.8  # 平均分超过50的部分转换为置信度（提高权重以更重视证据质量）
-
-            # 一致性加权：立场越一致，置信度越高
-            if support_ratio >= 0.8 or support_ratio <= 0.2:
-                consistency_bonus = 15  # 高度一致
-            elif support_ratio >= 0.7 or support_ratio <= 0.3:
-                consistency_bonus = 10  # 较为一致
-            else:
-                consistency_bonus = 0   # 存在争议
-
-            # Tier 1来源加成
-            tier1_bonus = 10 if any(e.tier == "Tier 1" for e in evidences) else 0
-
-            confidence = base_confidence + quality_bonus + consistency_bonus + tier1_bonus
-            confidence = min(100, max(0, confidence))  # 限制在0-100范围
-
-        logger.info(f"结论: {verdict}, 置信度: {confidence:.1f}%")
-
-        return verdict, round(confidence, 2)
+        logger.info(f"结论: {verdict}")
+        return verdict
 
     def _generate_uncertainty_note(self, evidences: List[EvidenceChainItem]) -> str:
         """生成不确定性说明"""
@@ -862,6 +942,12 @@ class EvidenceChainGenerator:
         old_evidence_count = sum(1 for e in evidences if e.freshness_score < 60)
         if old_evidence_count > len(evidences) / 2:
             notes.append("大部分证据时效性较差。")
+
+        # 检查独立信源（跨域名转载检测）
+        unique_domains = len(set(e.domain for e in evidences))
+        total_count = len(evidences)
+        if total_count >= 3 and unique_domains < total_count * 0.6:
+            notes.append("多个证据可能来自同一原始报道的多次转载或改写，表面交叉核实但实际信息源单一，结论可信度有限。")
 
         return "；".join(notes) if notes else "证据较为一致，可信度较高。"
 
@@ -949,7 +1035,7 @@ class EvidenceChainGenerator:
                 attempt_count = attempt + 1
                 logger.info(f"🔄 尝试 {attempt_count}/{max_attempts}，max_tokens={actual_max_tokens}")
 
-                response = self.glm_client.chat.completions.create(
+                response = await self.glm_client.chat.completions.create(
                     model=self.model_name,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.7,
@@ -1172,9 +1258,17 @@ class EvidenceChainGenerator:
         # 提取完整句子（以。！？结尾）
         sentences = []
         current = ''
-        for char in text:
+        text_length = len(text)
+        for idx, char in enumerate(text):
             current += char
-            if char in '。！？.!?':
+            is_decimal_point = (
+                char == '.'
+                and idx > 0
+                and idx + 1 < text_length
+                and text[idx - 1].isdigit()
+                and text[idx + 1].isdigit()
+            )
+            if char in '。！？!?' or (char == '.' and not is_decimal_point):
                 sentence = current.strip()
                 if len(sentence) > 10:
                     sentences.append(sentence)
@@ -1206,8 +1300,23 @@ class EvidenceChainGenerator:
         if not text:
             return ""
 
-        normalized = text.replace('\r\n', '\n').replace('\r', '\n')
+        normalized = sanitize_model_preamble(text)
+        normalized = normalized.replace('\r\n', '\n').replace('\r', '\n')
         normalized = re.sub(r'[ \t]+\n', '\n', normalized)
+        structural_labels = (
+            '关键误导点',
+            '身份确认',
+            '财富性质澄清',
+            '核心结论',
+            '结论判定',
+            '事实核查结论',
+            '说法拆解',
+        )
+        normalized = re.sub(
+            rf'(?<!\n)(?=({"|".join(map(re.escape, structural_labels))})：)',
+            '\n',
+            normalized,
+        )
         normalized = re.sub(r'(?<=[。！？.!?])\s+(?=(?:[-•*]|\d+[\.、])\s+)', '\n', normalized)
         normalized = re.sub(r'(?<=[。！？.!?])(?=(?:[-•*]|\d+[\.、])\s+)', '\n', normalized)
         normalized = re.sub(r'\n{2,}', '\n', normalized)

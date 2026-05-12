@@ -50,6 +50,55 @@ class SearchRulesTests(unittest.TestCase):
         self.assertTrue(any(item.recency_filter == "month" for item in plan))
         self.assertTrue(any("最新消息" in item.query for item in plan))
 
+    def test_disclosure_case_claim_expands_to_context_and_case_synonym_queries(self):
+        claim = "警方解密湾仔双尸案"
+
+        plan = _build_search_plan(claim)
+        queries = [item.query for item in plan]
+
+        self.assertTrue(any("重案解密" in query and "湾仔双尸案" in query for query in queries))
+        self.assertTrue(any("湾仔双尸案" in query and "披露" in query for query in queries))
+        self.assertTrue(any("湾仔豪宅双尸案" in query for query in queries))
+
+    def test_case_progress_claim_expands_to_background_and_latest_queries(self):
+        claim = "重庆姐弟坠亡案有最新进展"
+
+        plan = _build_search_plan(claim)
+        queries = [item.query for item in plan]
+
+        self.assertTrue(any("重庆姐弟坠亡案" in query and "最新进展" in query for query in queries))
+        self.assertTrue(any("重庆姐弟坠亡案" in query and "案情回顾" in query for query in queries))
+
+    def test_rumor_response_claim_expands_to_rumor_origin_queries(self):
+        claim = "官方回应某品牌创始人跑路传闻"
+
+        plan = _build_search_plan(claim)
+        queries = [item.query for item in plan]
+
+        self.assertTrue(any("某品牌创始人跑路传闻" in query and "官方回应" in query for query in queries))
+        self.assertTrue(any("某品牌创始人跑路传闻" in query and "网传" in query for query in queries))
+
+    def test_old_news_resurface_claim_expands_to_debunk_and_original_queries(self):
+        claim = "网传北京地铁事故为旧闻新传"
+
+        plan = _build_search_plan(claim)
+        queries = [item.query for item in plan]
+
+        self.assertTrue(any("北京地铁事故" in query and "旧闻新传" in query for query in queries))
+        self.assertTrue(any("北京地铁事故" in query and "原始报道" in query for query in queries))
+
+    def test_bizarre_video_claim_expands_to_origin_and_cross_language_queries(self):
+        claim = "三亚游泳耳朵里爬出螃蟹"
+
+        plan = _build_search_plan(claim)
+        queries = [item.query for item in plan]
+
+        self.assertIn("耳朵 螃蟹 游泳 原视频", queries)
+        self.assertIn("螃蟹 耳朵 浮潜", queries)
+        self.assertIn("crab ear snorkeling", queries)
+        self.assertIn("crab crawls out of ear", queries)
+        self.assertTrue(any(query == "三亚 游泳 耳朵 螃蟹" for query in queries))
+
     def test_price_claim_without_time_word_defaults_to_freshness_preference(self):
         claim = "敦煌鸣沙山顶矿泉水只卖2元"
 
@@ -296,6 +345,146 @@ class SearchRulesTests(unittest.TestCase):
         filtered = _filter_irrelevant_results(claim, [undated_history, fresh], min_relevance=0.2)
 
         self.assertEqual([item.url for item in filtered], ["https://example.com/fresh"])
+
+    def test_disclosure_case_claim_keeps_high_relevance_historical_background(self):
+        claim = "警方解密湾仔双尸案"
+        fresh_disclosure = SearchResult(
+            name="香港重案解密 湾仔双尸案首次披露",
+            url="https://example.com/fresh-disclosure",
+            summary="新书香港重案解密披露湾仔双尸案细节，警方人员讲述侦查过程。",
+            date_published=(date.today() - timedelta(days=2)).isoformat(),
+            source="example",
+        )
+        original_background = SearchResult(
+            name="湾仔豪宅双尸案案情回顾",
+            url="https://example.com/original-background",
+            summary="2014年湾仔豪宅双尸案，两名女子遇害，警方拘捕涉案人员。",
+            date_published="2014-11-02",
+            source="example",
+        )
+
+        filtered = _filter_irrelevant_results(
+            claim,
+            [fresh_disclosure, original_background],
+            min_relevance=0.2,
+        )
+
+        self.assertEqual(
+            [item.url for item in filtered],
+            ["https://example.com/fresh-disclosure", "https://example.com/original-background"],
+        )
+
+    def test_case_progress_claim_keeps_high_relevance_case_background(self):
+        claim = "重庆姐弟坠亡案有最新进展"
+        fresh_progress = SearchResult(
+            name="重庆姐弟坠亡案有最新进展 最高法院核准",
+            url="https://example.com/fresh-progress",
+            summary="重庆姐弟坠亡案有最新进展，法院发布案件执行信息。",
+            date_published=(date.today() - timedelta(days=2)).isoformat(),
+            source="example",
+        )
+        old_background = SearchResult(
+            name="重庆姐弟坠亡案案情回顾",
+            url="https://example.com/old-background",
+            summary="2021年重庆姐弟坠亡案一审宣判，案情显示两名儿童坠亡。",
+            date_published="2021-12-28",
+            source="example",
+        )
+
+        filtered = _filter_irrelevant_results(
+            claim,
+            [fresh_progress, old_background],
+            min_relevance=0.2,
+        )
+
+        self.assertEqual(
+            [item.url for item in filtered],
+            ["https://example.com/fresh-progress", "https://example.com/old-background"],
+        )
+
+    def test_rumor_response_claim_keeps_original_rumor_context(self):
+        claim = "官方回应某品牌创始人跑路传闻"
+        fresh_response = SearchResult(
+            name="官方回应某品牌创始人跑路传闻",
+            url="https://example.com/fresh-response",
+            summary="官方回应某品牌创始人跑路传闻，称相关网传信息不实。",
+            date_published=(date.today() - timedelta(days=1)).isoformat(),
+            source="example",
+        )
+        original_rumor = SearchResult(
+            name="网传某品牌创始人跑路",
+            url="https://example.com/original-rumor",
+            summary="此前网传某品牌创始人跑路，引发用户讨论。",
+            date_published="2025-10-01",
+            source="example",
+        )
+
+        filtered = _filter_irrelevant_results(
+            claim,
+            [fresh_response, original_rumor],
+            min_relevance=0.2,
+        )
+
+        self.assertEqual(
+            [item.url for item in filtered],
+            ["https://example.com/fresh-response", "https://example.com/original-rumor"],
+        )
+
+    def test_old_news_resurface_claim_keeps_original_old_report(self):
+        claim = "网传北京地铁事故为旧闻新传"
+        fresh_debunk = SearchResult(
+            name="网传北京地铁事故为旧闻新传 官方辟谣",
+            url="https://example.com/fresh-debunk",
+            summary="网传北京地铁事故为旧闻新传，官方称近期未发生相关事故。",
+            date_published=(date.today() - timedelta(days=1)).isoformat(),
+            source="example",
+        )
+        original_report = SearchResult(
+            name="北京地铁事故原始报道",
+            url="https://example.com/original-report",
+            summary="2019年北京地铁事故原始报道，现场曾有乘客受伤。",
+            date_published="2019-01-01",
+            source="example",
+        )
+
+        filtered = _filter_irrelevant_results(
+            claim,
+            [fresh_debunk, original_report],
+            min_relevance=0.2,
+        )
+
+        self.assertEqual(
+            [item.url for item in filtered],
+            ["https://example.com/fresh-debunk", "https://example.com/original-report"],
+        )
+
+    def test_bizarre_video_claim_keeps_old_original_video_context(self):
+        claim = "三亚游泳耳朵里爬出螃蟹"
+        fresh_repost = SearchResult(
+            name="三亚游泳耳朵里爬出了螃蟹 全网调侃厚礼蟹",
+            url="https://example.com/fresh-repost",
+            summary="三亚亚龙湾一名游客游泳时，一只活螃蟹从其耳道自行爬出。",
+            date_published=(date.today() - timedelta(days=1)).isoformat(),
+            source="example",
+        )
+        original_video = SearchResult(
+            name="Crab crawls out of snorkeler's ear in San Juan Puerto Rico",
+            url="https://example.com/original-video",
+            summary="A tiny crab crawled out of a snorkeler's ear after swimming near San Juan, Puerto Rico in 2022.",
+            date_published="2022-09-08",
+            source="example",
+        )
+
+        filtered = _filter_irrelevant_results(
+            claim,
+            [fresh_repost, original_video],
+            min_relevance=0.2,
+        )
+
+        self.assertEqual(
+            [item.url for item in filtered],
+            ["https://example.com/fresh-repost", "https://example.com/original-video"],
+        )
 
     def test_month_expansion_query_does_not_drop_relevant_event_results_missing_month_words(self):
         claim = "中国女子巴塞罗那街头遇害"

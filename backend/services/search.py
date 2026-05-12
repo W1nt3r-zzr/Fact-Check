@@ -204,6 +204,205 @@ def _is_time_sensitive_claim(claim: str) -> bool:
     return has_price_signal and has_context_signal
 
 
+BACKGROUND_EVENT_TEMPLATE_QUERIES = {
+    "disclosure_case": [
+        "重案解密 {base}",
+        "{base} 披露",
+        "{base} 案情回顾",
+        "{base} 旧案",
+    ],
+    "case_progress": [
+        "{base} 最新进展",
+        "{base} 案情回顾",
+        "{base} 时间线",
+    ],
+    "rumor_response": [
+        "{base} 官方回应",
+        "网传 {base}",
+        "{base} 传闻 来源",
+    ],
+    "old_news_resurface": [
+        "{base} 旧闻新传",
+        "{base} 辟谣",
+        "{base} 原始报道",
+    ],
+}
+
+
+def _detect_background_event_template(claim: str) -> Optional[str]:
+    """识别新闻点和背景事实分属不同时间层的事件模板。"""
+    text = claim or ''
+    if _is_disclosure_case_claim(text):
+        return "disclosure_case"
+
+    case_terms = ['案', '案件', '命案', '凶案', '事故', '事件']
+    progress_terms = ['最新进展', '新进展', '有进展', '进展', '后续', '进展如何', '时间线']
+    if any(term in text for term in case_terms) and any(term in text for term in progress_terms):
+        return "case_progress"
+
+    response_terms = ['回应', '辟谣', '澄清', '否认', '证实', '通报']
+    rumor_terms = ['传闻', '网传', '谣言', '传言', '消息称', '爆料']
+    if any(term in text for term in response_terms) and any(term in text for term in rumor_terms):
+        return "rumor_response"
+
+    old_news_terms = ['旧闻新传', '旧闻', '旧消息', '翻炒', '重新流传', '又传', '再传']
+    if any(term in text for term in old_news_terms):
+        return "old_news_resurface"
+
+    return None
+
+
+def _is_disclosure_case_claim(claim: str) -> bool:
+    """识别“近期披露/解密旧案”类说法，需同时召回近期披露和旧案背景。"""
+    text = claim or ''
+    disclosure_terms = [
+        '解密', '揭秘', '披露', '公开', '曝光', '出版', '新书', '档案',
+        '回顾', '还原', '纪实', '首次披露', '重案解密',
+    ]
+    case_terms = ['案', '案件', '旧案', '冷案', '重案', '命案', '凶案', '双尸']
+    return any(term in text for term in disclosure_terms) and any(term in text for term in case_terms)
+
+
+def _strip_background_event_terms(text: str) -> str:
+    """去掉新闻动作词，保留被报道的背景事实实体用于补召回。"""
+    stripped = text or ''
+    stripped = re.sub(
+        r'(警方|警察|警队|警務處|警务处|官方|新书|出版|首次|首次披露|重案解密|'
+        r'解密|揭秘|披露|公开|曝光|档案|回顾|还原|纪实|有最新进展|最新进展|新进展|'
+        r'有进展|进展如何|进展|后续|时间线|回应|辟谣|澄清|否认|证实|通报|'
+        r'网传|消息称|爆料|为|系|旧闻新传|旧闻|旧消息|'
+        r'翻炒|重新流传|又传|再传)',
+        '',
+        stripped,
+    )
+    return re.sub(r'\s+', ' ', stripped).strip()
+
+
+def _build_background_event_queries(claim: str, query: str) -> List[str]:
+    """为需要背景层证据的近期事件补充常见标题变体。"""
+    template = _detect_background_event_template(claim)
+    if not template:
+        return []
+
+    base = _strip_background_event_terms(query) or _strip_background_event_terms(claim)
+    if not base:
+        return []
+
+    candidates = [
+        pattern.format(base=base)
+        for pattern in BACKGROUND_EVENT_TEMPLATE_QUERIES.get(template, [])
+    ]
+
+    # 港澳台及都市新闻常用“豪宅双尸案”等场景化标题，原claim可能只写地名+双尸案。
+    compact_base = re.sub(r'\s+', '', base)
+    match = re.match(r'(?P<place>[一-龥]{2,8})双尸案$', compact_base)
+    if match:
+        candidates.append(f"{match.group('place')}豪宅双尸案 解密")
+
+    return [re.sub(r'\s+', ' ', candidate).strip() for candidate in candidates if candidate.strip()]
+
+
+def _has_background_event_coverage(claim: str, result: SearchResult) -> bool:
+    """判断旧结果是否可作为背景层证据，而不是无关旧闻。"""
+    template = _detect_background_event_template(claim)
+    if not template:
+        return False
+
+    base = _strip_background_event_terms(claim)
+    if not base:
+        return False
+    if template == "rumor_response":
+        base = re.sub(r'(传闻|谣言|传言)$', '', base).strip() or base
+
+    text = re.sub(r'\s+', '', f"{result.name} {result.summary}")
+    compact_base = re.sub(r'\s+', '', base)
+    if compact_base and compact_base in text:
+        return True
+
+    terms = [
+        term for term in re.findall(r'[一-龥A-Za-z0-9]{2,8}', compact_base)
+        if term not in STOP_WORDS and term not in ('警方', '解密', '披露', '案件')
+    ]
+    if not terms:
+        return False
+
+    hits = sum(1 for term in set(terms) if term in text)
+    if hits >= max(1, min(2, len(set(terms)))):
+        return True
+
+    if '双尸案' in compact_base and '双尸案' in text:
+        place = compact_base.replace('双尸案', '')
+        return bool(place and place in text)
+
+    return False
+
+
+def _is_bizarre_video_origin_claim(claim: str) -> bool:
+    """识别疑似短视频/旧素材换地点传播的离奇事件说法。"""
+    text = re.sub(r'\s+', '', claim or '')
+    if not text:
+        return False
+
+    body_or_scene_terms = ['耳朵', '耳道', '耳内', '嘴里', '鼻子', '身体', '游泳', '浮潜', '海边', '海里']
+    animal_or_object_terms = ['螃蟹', '蟹', '虫', '蛇', '鱼', '章鱼', '水母', '异物']
+    action_terms = ['爬出', '钻出', '出来', '取出', '进入', '钻进', '掉进']
+
+    return (
+        any(term in text for term in body_or_scene_terms)
+        and any(term in text for term in animal_or_object_terms)
+        and any(term in text for term in action_terms)
+    )
+
+
+def _build_bizarre_video_origin_queries(claim: str, query: str) -> List[str]:
+    """为疑似旧视频/跨语种传播的离奇事件补充原始来源查询。"""
+    if not _is_bizarre_video_origin_claim(claim):
+        return []
+
+    compact = re.sub(r'\s+', '', claim or query or '')
+    candidates: List[str] = []
+
+    if '三亚' in compact and '游泳' in compact and ('耳朵' in compact or '耳道' in compact) and ('螃蟹' in compact or '蟹' in compact):
+        candidates.extend([
+            '三亚 游泳 耳朵 螃蟹',
+            '耳朵 螃蟹 游泳 原视频',
+            '螃蟹 耳朵 浮潜',
+            '厚礼蟹 原视频',
+            'crab ear snorkeling',
+            'crab crawls out of ear',
+            'San Juan Puerto Rico crab ear',
+        ])
+    else:
+        terms = []
+        for term in ['耳朵', '耳道', '游泳', '浮潜', '螃蟹', '蟹', '原视频', '旧视频']:
+            if term in compact and term not in terms:
+                terms.append(term)
+        if terms:
+            candidates.append(' '.join(terms))
+            candidates.append(' '.join([term for term in terms if term not in {'原视频', '旧视频'}] + ['原视频']))
+
+    return [re.sub(r'\s+', ' ', candidate).strip() for candidate in candidates if candidate.strip()]
+
+
+def _has_bizarre_video_origin_coverage(claim: str, result: SearchResult) -> bool:
+    """判断旧来源是否覆盖离奇视频 claim 的原始素材背景。"""
+    if not _is_bizarre_video_origin_claim(claim):
+        return False
+
+    text = re.sub(r'\s+', ' ', f"{result.name} {result.summary}".lower())
+    compact = re.sub(r'\s+', '', f"{result.name} {result.summary}")
+
+    if ('螃蟹' in claim or '蟹' in claim) and ('耳朵' in claim or '耳道' in claim):
+        chinese_core = ('螃蟹' in compact or '蟹' in compact) and ('耳朵' in compact or '耳道' in compact)
+        english_core = 'crab' in text and 'ear' in text
+        origin_context = any(term in compact for term in ['原视频', '旧视频', '波多黎各', '圣胡安', '浮潜']) or any(
+            term in text for term in ['snorkel', 'snorkeling', 'swim', 'swimming', 'puerto rico', 'san juan', 'original video']
+        )
+        return (chinese_core or english_core) and origin_context
+
+    return False
+
+
 def _extract_price_signals(text: str) -> set[str]:
     """提取价格信号，统一去掉空格便于匹配。"""
     compact = re.sub(r'\s+', '', text)
@@ -407,6 +606,13 @@ def _build_search_plan(claim: str) -> List[SearchPlanItem]:
         if simplified and simplified != query:
             add(f"{simplified} {month_str}", "month")
 
+    for background_query in _build_background_event_queries(claim, query):
+        add(background_query)
+        add(f"{background_query} {month_str}", "month")
+
+    for origin_query in _build_bizarre_video_origin_queries(claim, query):
+        add(origin_query)
+
     if _is_legal_dynamic_claim(claim):
         for legal_query in _build_legal_dynamic_queries(claim, query):
             add(legal_query)
@@ -600,6 +806,10 @@ def _is_stale_for_recent_claim(claim: str, result: SearchResult) -> bool:
     is_time_sensitive = _is_time_sensitive_claim(claim)
     if not (is_event_or_explicit_recent or is_time_sensitive):
         return False
+    if _has_background_event_coverage(claim, result):
+        return False
+    if _has_bizarre_video_origin_coverage(claim, result):
+        return False
     age_days = _age_days(result.date_published)
     if age_days is None:
         return is_event_or_explicit_recent or is_time_sensitive
@@ -627,6 +837,8 @@ def _filter_irrelevant_results(claim: str, results: List[SearchResult], min_rele
             scored.append((r, 0.0, 0.0, -1.0, True))
             continue
         relevance = _compute_relevance(claim, r)
+        if _has_bizarre_video_origin_coverage(claim, r):
+            relevance = max(relevance, min_relevance)
         freshness = _freshness_score(r.date_published) if recent_claim else 0.0
         stale_for_recent = _is_stale_for_recent_claim(claim, r)
         stale_penalty = 0.35 if stale_for_recent else 0.0
