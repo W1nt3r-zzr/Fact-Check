@@ -902,6 +902,7 @@ async function performCheckRealStream(text, enable_thinking = false) {
     clearInterval(timerInterval);
     if (window._aiCheckActiveRequest?.controller === requestController) {
       window._aiCheckActiveRequest = null;
+      stream.running = false;
     }
     const _ld = document.getElementById('aiCheckLoading');
     const _pb = document.getElementById('aiCheckProgress');
@@ -1123,7 +1124,7 @@ function displayResult(data, originalClaim) {
   if (totalEvidence > 0) {
     // 证据检索与质量说明
     const totalSearchResults = ec?.total_search_results || 0;
-    html += buildEvidenceOverviewHtml(totalSearchResults, totalEvidence, ec?.reasoning_summary);
+    html += buildEvidenceOverviewHtml(totalSearchResults, totalEvidence, ec?.reasoning_summary, ec?.all_search_results);
 
     html += `
       <div class="stats-row">
@@ -1175,7 +1176,7 @@ function displayResult(data, originalClaim) {
   html += `<div class="tab-content" id="tab-reasoning" style="display:none">`;
 
   if (reasoningContent) {
-    const reasoningDisplayContent = buildReasoningDisplayContent(reasoningContent);
+    const reasoningDisplayContent = buildReasoningDisplayContent(reasoningContent, ec);
     reasoningDetailMarkdown = reasoningDisplayContent;
 
     html += `
@@ -1207,6 +1208,8 @@ function displayResult(data, originalClaim) {
   html += '</div>';
 
   result.innerHTML = html;
+  result.removeEventListener('click', handleEvidenceAnchorClick);
+  result.addEventListener('click', handleEvidenceAnchorClick);
 
   // === 事件绑定 ===
 
@@ -1435,7 +1438,7 @@ function findKeywordMatches(content, keyword) {
   return matches.sort((a, b) => a.start - b.start || b.end - a.end);
 }
 
-function buildEvidenceOverviewHtml(totalSearchResults, totalEvidence, reasoningSummary) {
+function buildEvidenceOverviewHtml(totalSearchResults, totalEvidence, reasoningSummary, allSearchResults) {
   const lines = [];
   if (totalSearchResults > totalEvidence) {
     lines.push(`检索到 ${totalSearchResults} 个结果，其中 ${totalEvidence} 个与待核查说法匹配度较高，已作为核心证据进行分析；其余结果可能为重复转载、背景信息或相关性较弱内容。`);
@@ -1448,8 +1451,31 @@ function buildEvidenceOverviewHtml(totalSearchResults, totalEvidence, reasoningS
     lines.push(qualitySummary);
   }
 
+  let allSourcesHtml = '';
+  if (Array.isArray(allSearchResults) && allSearchResults.length > 0) {
+    const uniqueDomains = [];
+    const seen = new Set();
+    allSearchResults.forEach(r => {
+      const domain = r.domain || '';
+      if (domain && !seen.has(domain)) {
+        seen.add(domain);
+        uniqueDomains.push({ domain, title: r.title || '' });
+      }
+    });
+    if (uniqueDomains.length > 0) {
+      const sourceItems = uniqueDomains.map((item, idx) =>
+        `<span class="all-source-item" title="${escapeHtml(item.title)}">${escapeHtml(item.domain)}</span>`
+      ).join(' · ');
+      allSourcesHtml = `
+        <div class="all-sources-row">
+          <span class="all-sources-label">全部来源</span>
+          <span class="all-sources-list">${sourceItems}</span>
+        </div>`;
+    }
+  }
+
   return lines.length
-    ? `<div class="evidence-retrieval-info">📊 ${lines.map(line => renderInlineMarkdown(line)).join('<br>')}</div>`
+    ? `<div class="evidence-retrieval-info">📊 ${lines.map(line => renderInlineMarkdown(line)).join('<br>')}${allSourcesHtml}</div>`
     : '';
 }
 
@@ -1478,6 +1504,19 @@ function extractHighlightKeywords(claim, data, reportText = '') {
     '他说', '她说', '表示', '声称', '指出', '认为', '发现', '是否', '真的',
     '网传', '传言', '网友', '消息', '相关', '情况', '内容', '信息', '记者',
   ]);
+
+  // 实体前缀边界：排除常见动词、介词、代词、连词、副词，
+  // 否则机构名正则会把"核心驱动是公司""报道所指为A股上市公司"这类语义片段误识别为机构名。
+  // 注意"有"在边界列表内，因此组合后缀(股份有限公司|有限责任公司|有限公司)必须排在前面，
+  // 才能让正则在前缀停在"有"之前时仍匹配到完整的"X股份有限公司"。
+  const ENTITY_BREAKER_CHARS = '是为的了着被把与和或及并跟同在有由从向到对以于比给因这那此其该也还就再又都已即便要会能';
+  const ENTITY_PREFIX_CHAR = `(?:[A-Za-z0-9]|(?![${ENTITY_BREAKER_CHARS}])[一-鿿])`;
+  const ORG_SUFFIX_FULL = '股份有限公司|有限责任公司|有限公司|公司|集团|股份|科技|大学|银行|证券|基金|交易所|研究院|部门|机构|税务局|税务总局|总局|管理局|委员会|卫健委|统计局|法院|警方|迪士尼';
+  const ORG_SUFFIX_CLAIM = '股份有限公司|有限责任公司|有限公司|公司|集团|股份|科技|大学|银行|证券|基金|交易所|研究院|部门|机构|税务局|卫健委|统计局|法院|警方|迪士尼';
+  const ORG_SUFFIX_TITLE = '股份有限公司|有限责任公司|有限公司|公司|集团|股份|科技|大学|银行|证券|基金|交易所|研究院|部门|机构';
+  const ORG_REGEX_FULL = new RegExp(`${ENTITY_PREFIX_CHAR}{2,14}(?:${ORG_SUFFIX_FULL})`, 'g');
+  const ORG_REGEX_CLAIM = new RegExp(`${ENTITY_PREFIX_CHAR}{2,12}(?:${ORG_SUFFIX_CLAIM})`, 'g');
+  const ORG_REGEX_TITLE = new RegExp(`${ENTITY_PREFIX_CHAR}{2,8}(?:${ORG_SUFFIX_TITLE})`, 'g');
 
   function addKeyword(value, priority = 10) {
     const kw = String(value || '').trim().replace(/^[，,。.！!？?；;：:、\s]+|[，,。.！!？?；;：:、\s]+$/g, '');
@@ -1563,7 +1602,7 @@ function extractHighlightKeywords(claim, data, reportText = '') {
       });
     (text.match(/[一-鿿]{2,18}(?:生产标准和检测规范|检测规范|生产标准|统一标准|行业标准|国家标准|检验规范|监管规范)/g) || [])
       .forEach(e => addKeyword(e, priority + 6));
-    (text.match(/[一-鿿A-Za-z0-9]{2,14}(?:公司|集团|股份|科技|大学|银行|证券|基金|交易所|研究院|部门|机构|税务局|税务总局|总局|管理局|委员会|卫健委|统计局|法院|警方|迪士尼)/g) || [])
+    (text.match(ORG_REGEX_FULL) || [])
       .forEach(e => addKeyword(e, priority + 3));
     (text.match(/(?:国家|中国|上海|北京|广东|浙江|江苏|四川|湖北|湖南|山东|河南|河北|福建|深圳|广州)[一-鿿]{2,12}(?:发布|通报|公告|披露|回应|证实|辟谣)/g) || [])
       .forEach(e => addKeyword(e.replace(/(?:发布|通报|公告|披露|回应|证实|辟谣)$/, ''), priority + 4));
@@ -1579,7 +1618,7 @@ function extractHighlightKeywords(claim, data, reportText = '') {
   // 2. 主体/地点/机构：短但关键，单纯按长度排序会漏掉
   (claim.match(/(?:网红|博主|演员|歌手|专家|医生|学生|男孩|女孩|品牌|公司)?([一-鿿]{2,4})(?=在|因|被|偷|少缴|处罚|罚款|涉嫌|称|表示|回应|发布|通报)/g) || [])
     .forEach(e => addKeyword(e.replace(/^(网红|博主|演员|歌手|专家|医生|学生|男孩|女孩|品牌|公司)/, ''), 88));
-  (claim.match(/[一-鿿A-Za-z0-9]{2,12}(?:公司|集团|股份|科技|大学|银行|证券|基金|交易所|研究院|部门|机构|税务局|卫健委|统计局|法院|警方|迪士尼)/g) || [])
+  (claim.match(ORG_REGEX_CLAIM) || [])
     .forEach(e => addKeyword(e, 86));
   (claim.match(/[一-鿿]{2,8}(?:市|省|县|区|镇|机场|学校|医院|景区|乐园|口岸|港口)/g) || [])
     .forEach(e => addKeyword(e, 84));
@@ -1605,7 +1644,7 @@ function extractHighlightKeywords(claim, data, reportText = '') {
   allEvidence.forEach(ev => {
     const title = ev.title || '';
     // 机构名（XX公司、XX集团等）
-    (title.match(/[一-鿿A-Za-z0-9]{2,8}(?:公司|集团|股份|科技|大学|银行|证券|基金|交易所|研究院|部门|机构)/g) || [])
+    (title.match(ORG_REGEX_TITLE) || [])
       .forEach(e => addKeyword(e, 55));
     // 人名（2-4字中文，通常在标题开头或"某某表示"中）
     const nameMatch = title.match(/([一-鿿]{2,4})(?:表示|称|指出|认为|透露|透露|回应|透露)/);
@@ -1661,8 +1700,12 @@ function normalizeAISummaryMarkdown(text) {
   const sectionTitles = [
     '核心事实提取',
     '核心事实',
+    '深度洞察',
     '洞察分析',
+    '与说法的精确对比',
     '与说法的关系',
+    '准确点',
+    '偏差与限定',
     '事实依据',
     '结论判断',
     '限定条件',
@@ -1674,7 +1717,9 @@ function normalizeAISummaryMarkdown(text) {
   normalized = normalized
     .replace(new RegExp(`(?:^|\\n)\\s*\\d+[\\.．、]\\s*\\*\\*(${titlePattern})\\*\\*[：:]\\s*`, 'g'), '\n### $1\n')
     .replace(new RegExp(`(?:^|\\n)\\s*\\d+[\\.．、]\\s*(${titlePattern})[：:]\\s*`, 'g'), '\n### $1\n')
-    .replace(new RegExp(`(?:^|\\n)\\s*\\*\\*(${titlePattern})\\*\\*[：:]\\s*`, 'g'), '\n### $1\n');
+    .replace(new RegExp(`(?:^|\\n)\\s*(?:[-•*]\\s+)?\\*\\*(${titlePattern})\\*\\*[：:]\\s*`, 'g'), '\n### $1\n')
+    // 处理没有冒号的加粗标题（独占一行或紧跟内容）
+    .replace(new RegExp(`(?:^|\\n)\\s*\\*\\*(${titlePattern})\\*\\*\\s*(?=\\n|\\*\\*|[^*]|$)`, 'g'), '\n### $1\n');
 
   return normalized
     .split('\n')
@@ -1739,7 +1784,7 @@ function buildEvidenceRelationLead(ec) {
   const supportCount = ec?.supporting_evidence?.length || 0;
   const opposeCount = ec?.opposing_evidence?.length || 0;
   const neutralCount = ec?.neutral_evidence?.length || 0;
-  const total = ec?.total_evidence || supportCount + opposeCount + neutralCount;
+  const total = supportCount + opposeCount + neutralCount;
   if (!total) return '';
 
   if (supportCount === total) {
@@ -1763,14 +1808,36 @@ function buildEvidenceRelationLead(ec) {
   return `${total}条核心证据呈现多种立场，需要结合证据关系综合判断。`;
 }
 
+function normalizeReasoningEvidenceCountText(text, ec) {
+  if (!text) return '';
+  const supportCount = ec?.supporting_evidence?.length || 0;
+  const opposeCount = ec?.opposing_evidence?.length || 0;
+  const neutralCount = ec?.neutral_evidence?.length || 0;
+  const total = supportCount + opposeCount + neutralCount;
+  if (!total) return text;
+
+  return String(text)
+    .replace(
+      /(?<!第)(?:(所有|全部|上述|以上|这些|这|本次|展示的)\s*)?\d+\s*(条|个)\s*(核心)?证据/g,
+      (_, prefix = '', unit, qualifier = '') => {
+        const normalizedQualifier = qualifier || '核心';
+        return `${prefix || ''}${total}${unit}${normalizedQualifier}证据`;
+      },
+    )
+    .replace(
+      /(所有|全部|上述|以上|这些|这|本次|展示的)\s*证据/g,
+      (_, prefix) => `${prefix}${total}条核心证据`,
+    );
+}
+
 function buildReasoningBrief(text, ec) {
   const lead = buildEvidenceRelationLead(ec);
-  const detail = extractReasoningBrief(text);
+  const detail = normalizeReasoningEvidenceCountText(extractReasoningBrief(text), ec);
   if (lead && detail) return `${lead}${detail}`;
   return lead || detail || '';
 }
 
-function buildReasoningDisplayContent(text) {
+function buildReasoningDisplayContent(text, ec) {
   if (!text) return '';
 
   let content = normalizeMarkdownLineBreaks(text);
@@ -1780,9 +1847,10 @@ function buildReasoningDisplayContent(text) {
   );
   content = content.replace(/###\s*5[\.．、][\s\S]*$/i, '');
   content = normalizeReasoningDisplayHeadings(content);
+  content = normalizeReasoningEvidenceCountText(content, ec);
   content = content.replace(/\n{3,}/g, '\n\n').trim();
 
-  return content || extractReasoningBrief(text);
+  return content || normalizeReasoningEvidenceCountText(extractReasoningBrief(text), ec);
 }
 
 function normalizeReasoningDisplayHeadings(text) {
@@ -2120,21 +2188,115 @@ function createEvidenceAnchorLink(index) {
 function linkEvidenceReferences(html) {
   if (!html) return '';
   return html.replace(
-    /证据\s*\[?\s*(\d{1,2})\s*\]?(?:\s*([-—至到])\s*\[?\s*(\d{1,2})\s*\]?)?/g,
-    (match, start, separator, end) => {
-      const startLink = createEvidenceAnchorLink(start);
-      if (!end) return `证据 ${startLink}`;
-      const normalizedSeparator = separator === '至' || separator === '到' ? '-' : separator;
-      return `证据 ${startLink}${normalizedSeparator}${createEvidenceAnchorLink(end)}`;
+    /证据\s*((?:\[?\s*\d{1,2}\s*\]?\s*(?:[-—至到、,，和及与]\s*)?)+)/g,
+    (match, sequence) => {
+      const linkedSequence = sequence.replace(
+        /\[?\s*(\d{1,2})\s*\]?/g,
+        (_, index) => createEvidenceAnchorLink(index),
+      );
+      return `证据 ${linkedSequence}`;
     },
   );
+}
+
+function getActiveResultTab(resultRoot) {
+  return resultRoot?.querySelector('.tab-item.tab-active')?.dataset.tab || 'evidence';
+}
+
+function activateResultTab(resultRoot, tabName) {
+  if (!resultRoot || !tabName) return;
+
+  const targetTab = resultRoot.querySelector(`.tab-item[data-tab="${tabName}"]`);
+  const targetPanel = resultRoot.querySelector(`#tab-${tabName}`);
+  if (!targetTab || !targetPanel) return;
+
+  resultRoot.querySelectorAll('.tab-item').forEach(tab => tab.classList.remove('tab-active'));
+  targetTab.classList.add('tab-active');
+  resultRoot.querySelectorAll('.tab-content').forEach(content => {
+    content.style.display = content.id === `tab-${tabName}` ? 'block' : 'none';
+  });
+}
+
+function getEvidenceScrollContainer() {
+  return document.querySelector('#ai-check-window .ai-check-window-body');
+}
+
+function handleEvidenceAnchorClick(event) {
+  const link = event.target?.closest?.('a.evidence-anchor-link');
+  if (!link) return;
+
+  const evidenceId = (link.getAttribute('href') || '').replace(/^#/, '');
+  if (!evidenceId) return;
+
+  const resultRoot = link.closest('#aiCheckResult') || document.getElementById('aiCheckResult');
+  const target = document.getElementById(evidenceId);
+  if (!target || !resultRoot?.contains(target)) return;
+
+  event.preventDefault();
+
+  const scrollContainer = getEvidenceScrollContainer();
+  const returnState = {
+    tab: getActiveResultTab(resultRoot),
+    scrollTop: scrollContainer?.scrollTop || 0,
+    link,
+  };
+
+  activateResultTab(resultRoot, 'evidence');
+
+  if (scrollContainer) {
+    const containerRect = scrollContainer.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    const offset = targetRect.top - containerRect.top + scrollContainer.scrollTop - 16;
+    scrollContainer.scrollTo({ top: Math.max(0, offset), behavior: 'smooth' });
+  } else {
+    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  target.classList.remove('evidence-card-jump');
+  void target.offsetWidth;
+  target.classList.add('evidence-card-jump');
+  setTimeout(() => target.classList.remove('evidence-card-jump'), 1400);
+  showEvidenceReturnButton(target, resultRoot, returnState);
+}
+
+function showEvidenceReturnButton(target, resultRoot, returnState) {
+  resultRoot?.querySelectorAll('.evidence-return-link').forEach(button => button.remove());
+  if (!target || !resultRoot || !returnState) return;
+
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'evidence-return-link';
+  button.textContent = '返回引用位置';
+  button.addEventListener('click', () => {
+    const scrollContainer = getEvidenceScrollContainer();
+    activateResultTab(resultRoot, returnState.tab);
+
+    requestAnimationFrame(() => {
+      if (scrollContainer) {
+        scrollContainer.scrollTo({ top: returnState.scrollTop, behavior: 'smooth' });
+      }
+      returnState.link?.classList?.add('evidence-anchor-return-focus');
+      setTimeout(() => returnState.link?.classList?.remove('evidence-anchor-return-focus'), 1200);
+      button.remove();
+    });
+  });
+
+  target.appendChild(button);
 }
 
 function getMarkdownRelationClass(text) {
   const normalized = String(text || '').replace(/\s+/g, '');
   if (!normalized) return '';
-  const hasNegatedConflict = /(无|没有|未见|不存在|并无|并未|未发现|无任何)(?:[一-龥]{0,6})?(矛盾|冲突|对立|反对|反驳|不一致|分歧)/.test(normalized);
-  const hasSupportSignal = /(支持|印证|证实|佐证|一致|吻合|共同指向|相互补充|补充说明|证据链)/.test(normalized);
+
+  // 明确的正向结论：说法相符/属实/未歪曲等结论性表态优先识别，
+  // 避免段落里出现"核心矛盾"这类名词性词汇就被误判为证据冲突。
+  const hasPositiveVerdict = /(基本相符|完全相符|大致相符|高度相符|相互吻合|相互印证|与[一-龥A-Za-z0-9]{0,12}(?:基本|完全|大致|高度)?一致|与[一-龥A-Za-z0-9]{0,12}(?:基本|完全|大致|高度)?吻合|与[一-龥A-Za-z0-9]{0,12}(?:基本|完全|大致|高度)?相符|未(?:见|存在)?(?:歪曲|夸大|失实|偏差)|属实|说法(?:基本)?成立|核心事实(?:基本)?(?:成立|属实)|准确概括)/.test(normalized);
+  if (hasPositiveVerdict) {
+    return ' md-relation md-relation-support';
+  }
+
+  const hasNegatedConflict = /(无|没有|未见|不存在|并无|并未|未发现|无任何)(?:[一-龥]{0,16})?(质疑|矛盾|冲突|对立|反对|反驳|不一致|分歧)/.test(normalized);
+  const hasSupportSignal = /(支持|印证|证实|佐证|一致|吻合|相符|共同指向|相互补充|补充说明|证据链)/.test(normalized);
   if (!hasNegatedConflict && /(矛盾|冲突|对立|反对|反驳|不一致|否定|存疑|分歧)/.test(normalized)) {
     return ' md-relation md-relation-conflict';
   }
@@ -2447,22 +2609,30 @@ function reopenCheckFromSidebar(claim) {
   // 恢复流式进度到新模态窗口
   setTimeout(() => {
     const stream = window._aiCheckStream;
-    if (!stream || !stream.running) return;
+    if (!stream) return;
 
     const startBtn = document.getElementById('aiCheckStart');
     const progressBar = document.getElementById('aiCheckProgress');
     const thinkingEl = document.getElementById('aiCheckThinking');
 
-    // 隐藏开始按钮，显示进度条
-    if (startBtn) startBtn.classList.add('hidden');
-    if (progressBar) progressBar.classList.remove('hidden');
+    const hasAccumulated = stream.streamStarted && (stream.thinkingContent || stream.fullContent);
 
-    // 恢复已累积的流式内容
-    if (stream.streamStarted && (stream.thinkingContent || stream.fullContent)) {
+    if (stream.running) {
+      // 流仍在跑：隐藏开始按钮，显示进度条
+      if (startBtn) startBtn.classList.add('hidden');
+      if (progressBar) progressBar.classList.remove('hidden');
+    }
+
+    // 恢复已累积的流式内容（不论流是否还活着，有内容就展示）
+    if (hasAccumulated) {
       if (thinkingEl) {
         thinkingEl.classList.remove('hidden');
         const content = stream.fullContent || stream.thinkingContent;
-        const header = stream.fullContent ? '正在生成核查报告...' : '正在分析证据相关性...';
+        const header = stream.fullContent
+          ? '正在生成核查报告...'
+          : stream.running
+            ? '正在分析证据相关性...'
+            : '核查已中断，以下是已生成内容';
         thinkingEl.innerHTML = `<div class="streaming-card streaming-card--draft">
           <div class="streaming-card-header">
             <span>${header}</span>

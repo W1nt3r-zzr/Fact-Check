@@ -94,6 +94,9 @@ class EvidenceChain:
     generated_at: str  # 生成时间
     processing_time_ms: float  # 处理时间
 
+    # 所有检索结果（含未被选为核心证据的）
+    all_search_results: List[Dict[str, str]] = field(default_factory=list)  # 全部检索来源
+
     # AI归纳总结（放在最后，因为有默认值）
     ai_summary: Optional[Dict[str, str]] = None  # AI归纳总结（包含full和brief字段）
 
@@ -115,7 +118,8 @@ class EvidenceChainGenerator:
         enable_link_validation: bool = False,
         top_k: int = 5,
         reasoning_text: Optional[str] = None,
-        total_search_results: int = 0
+        total_search_results: int = 0,
+        all_search_results: Optional[List[Dict[str, str]]] = None
     ) -> EvidenceChain:
         """
         生成证据链
@@ -273,7 +277,8 @@ class EvidenceChainGenerator:
             unique_domain_count=unique_domain_count,
             average_score=round(avg_score, 2),
             generated_at=datetime.now().isoformat(),
-            processing_time_ms=round(processing_time, 2)
+            processing_time_ms=round(processing_time, 2),
+            all_search_results=all_search_results or []
         )
 
         logger.info(f"证据链生成完成: {len(chain_items)} 个证据, 耗时: {processing_time:.0}ms")

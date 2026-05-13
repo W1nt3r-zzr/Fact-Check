@@ -437,13 +437,24 @@ async def fact_check_stream(request: FactCheckRequest):
                     for result in reasoning_results
                 ]
 
+                # 所有检索结果（含未入选核心证据的）用于展示完整来源
+                all_search_results_dicts = [
+                    {
+                        "title": result.name,
+                        "url": result.url,
+                        "domain": result.source or (lambda u: (u.split('/')[2].replace('www.', '') if len(u.split('/')) > 2 else u))(result.url)
+                    }
+                    for result in search_results
+                ]
+
                 evidence_chain = await _evidence_chain_generator.generate_evidence_chain(
                     claim=request.claim,
                     search_results=search_results_dicts,
                     enable_link_validation=request.enable_link_validation,
                     top_k=len(reasoning_results),
                     reasoning_text=full_content,
-                    total_search_results=len(search_results)
+                    total_search_results=len(search_results),
+                    all_search_results=all_search_results_dicts
                 )
 
                 result_data = {
@@ -457,7 +468,8 @@ async def fact_check_stream(request: FactCheckRequest):
                         "total_evidence": evidence_chain.total_evidence,
                         "total_search_results": evidence_chain.total_search_results,
                         "reasoning_summary": evidence_chain.reasoning_summary,
-                        "ai_summary": evidence_chain.ai_summary
+                        "ai_summary": evidence_chain.ai_summary,
+                        "all_search_results": getattr(evidence_chain, "all_search_results", [])
                     }
                 }
 
@@ -606,6 +618,17 @@ async def fact_check(request: FactCheckRequest):
                     }
                     for result in reasoning_results
                 ]
+
+                # 所有检索结果（含未入选核心证据的）用于展示完整来源
+                all_search_results_dicts = [
+                    {
+                        "title": result.name,
+                        "url": result.url,
+                        "domain": result.source or (lambda u: (u.split('/')[2].replace('www.', '') if len(u.split('/')) > 2 else u))(result.url)
+                    }
+                    for result in search_results
+                ]
+
                 reasoning_text = reasoning_result.get("reasoning", "")
                 evidence_chain = await _evidence_chain_generator.generate_evidence_chain(
                     claim=request.claim,
@@ -613,7 +636,8 @@ async def fact_check(request: FactCheckRequest):
                     enable_link_validation=request.enable_link_validation,
                     top_k=len(reasoning_results),
                     reasoning_text=reasoning_text,
-                    total_search_results=len(search_results)
+                    total_search_results=len(search_results),
+                    all_search_results=all_search_results_dicts
                 )
                 logger.info(f"证据链生成完成: {evidence_chain.total_evidence} 个证据")
                 return evidence_chain
@@ -640,7 +664,8 @@ async def fact_check(request: FactCheckRequest):
                     "authoritative_sources": evidence_chain.authoritative_sources,
                     "average_score": evidence_chain.average_score,
                     "reasoning_summary": evidence_chain.reasoning_summary,
-                    "ai_summary": evidence_chain.ai_summary
+                    "ai_summary": evidence_chain.ai_summary,
+                    "all_search_results": getattr(evidence_chain, "all_search_results", [])
                 }
 
         # 步骤8: 返回结果

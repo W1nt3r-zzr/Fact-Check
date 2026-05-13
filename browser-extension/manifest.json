@@ -23,10 +23,6 @@
     "default_title": "AI信息核查助手"
   },
 
-  "chrome_url_overrides": {
-    "newtab": "newtab/newtab.html"
-  },
-
   "background": {
     "service_worker": "background.js"
   },

@@ -283,7 +283,7 @@ function displayPopupResult(data) {
   if (actualTotal > 0) {
     // 证据检索逻辑说明
     const totalSearchResults = ec?.total_search_results || 0;
-    html += buildPopupEvidenceOverviewHtml(totalSearchResults, actualTotal, ec?.reasoning_summary);
+    html += buildPopupEvidenceOverviewHtml(totalSearchResults, actualTotal, ec?.reasoning_summary, ec?.all_search_results);
 
     html += `
       <div class="stats-row">
@@ -386,7 +386,7 @@ function displayPopupResult(data) {
   });
 }
 
-function buildPopupEvidenceOverviewHtml(totalSearchResults, totalEvidence, reasoningSummary) {
+function buildPopupEvidenceOverviewHtml(totalSearchResults, totalEvidence, reasoningSummary, allSearchResults) {
   const lines = [];
   if (totalSearchResults > totalEvidence) {
     lines.push(`检索到 ${totalSearchResults} 个结果，其中 ${totalEvidence} 个与待核查说法匹配度较高，已作为核心证据进行分析；其余结果可能为重复转载、背景信息或相关性较弱内容。`);
@@ -399,8 +399,31 @@ function buildPopupEvidenceOverviewHtml(totalSearchResults, totalEvidence, reaso
     lines.push(qualitySummary);
   }
 
+  let allSourcesHtml = '';
+  if (Array.isArray(allSearchResults) && allSearchResults.length > 0) {
+    const uniqueDomains = [];
+    const seen = new Set();
+    allSearchResults.forEach(r => {
+      const domain = r.domain || '';
+      if (domain && !seen.has(domain)) {
+        seen.add(domain);
+        uniqueDomains.push({ domain, title: r.title || '' });
+      }
+    });
+    if (uniqueDomains.length > 0) {
+      const sourceItems = uniqueDomains.map((item) =>
+        `<span class="all-source-item" title="${escapeHtml(item.title)}">${escapeHtml(item.domain)}</span>`
+      ).join(' · ');
+      allSourcesHtml = `
+        <div class="all-sources-row">
+          <span class="all-sources-label">全部来源</span>
+          <span class="all-sources-list">${sourceItems}</span>
+        </div>`;
+    }
+  }
+
   return lines.length
-    ? `<div class="evidence-retrieval-info">📊 ${lines.map(line => renderInlineMarkdown(line)).join('<br>')}</div>`
+    ? `<div class="evidence-retrieval-info">📊 ${lines.map(line => renderInlineMarkdown(line)).join('<br>')}${allSourcesHtml}</div>`
     : '';
 }
 

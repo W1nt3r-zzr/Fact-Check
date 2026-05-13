@@ -24,9 +24,6 @@ const manifest = JSON.parse(fs.readFileSync(
   path.join(__dirname, '../manifest.json'),
   'utf8',
 ));
-const newtabHtmlPath = path.join(__dirname, '../newtab/newtab.html');
-const newtabStylesPath = path.join(__dirname, '../newtab/newtab.css');
-const newtabScriptPath = path.join(__dirname, '../newtab/newtab.js');
 
 test('content script does not shadow global window in openCheckWindow', () => {
   assert.doesNotMatch(contentScript, /const\s+window\s*=\s*document\.createElement/);
@@ -48,20 +45,8 @@ test('floating entry is kept visible without requiring text selection', () => {
   assert.doesNotMatch(contentScript, /selectedText[\s\S]{0,120}createFloatingButton/);
 });
 
-test('default browser new tab is replaced with an extension page that shows the check entry', () => {
-  assert.equal(manifest.chrome_url_overrides?.newtab, 'newtab/newtab.html');
-  assert.ok(fs.existsSync(newtabHtmlPath));
-  assert.ok(fs.existsSync(newtabStylesPath));
-  assert.ok(fs.existsSync(newtabScriptPath));
-
-  const newtabHtml = fs.readFileSync(newtabHtmlPath, 'utf8');
-  const newtabStyles = fs.readFileSync(newtabStylesPath, 'utf8');
-  const newtabScript = fs.readFileSync(newtabScriptPath, 'utf8');
-
-  assert.match(newtabHtml, /id="ai-check-newtab-entry"/);
-  assert.match(newtabHtml, /popup\/popup\.js/);
-  assert.match(newtabStyles, /position:\s*fixed/);
-  assert.match(newtabScript, /claimText\.focus\(\)/);
+test('extension does not hijack the browser default new tab page', () => {
+  assert.equal(manifest.chrome_url_overrides, undefined);
 });
 
 test('popup check button has an in-flight request guard', () => {
@@ -156,6 +141,68 @@ test('AI summary detail uses unified markdown layout', () => {
   assert.match(contentStyles, /hero-summary-full \.markdown-content \.md-p/);
   assert.match(contentStyles, /hero-summary-full \.markdown-content \.md-li/);
   assert.match(contentStyles, /hero-summary-full > \.markdown-content/);
+});
+
+test('AI summary detail uses the same lightweight relation style as reasoning detail', () => {
+  assert.match(contentStyles, /AI归纳总结详细报告：使用连续审阅文档版式，与证据解读保持统一轻量标注/);
+  assert.match(contentStyles, /hero-summary-full > \.markdown-content\s*\{\s*display:\s*block/);
+  assert.match(contentStyles, /hero-summary-full \.markdown-content \.md-relation\s*\{[\s\S]*border-left:\s*3px solid #c5cfda/);
+  assert.match(contentStyles, /hero-summary-full \.markdown-content \.md-relation-support\s*\{[\s\S]*background:\s*transparent/);
+  assert.doesNotMatch(contentStyles, /hero-summary-full \.markdown-content \.md-relation-support::before[\s\S]*content:\s*none/);
+  assert.match(contentStyles, /hero-summary-full \.markdown-content \.md-p[\s\S]*background:\s*transparent/);
+});
+
+test('reasoning detail uses lightweight relation markers instead of large cards', () => {
+  assert.match(contentStyles, /详细报告：保留关系提示/);
+  assert.match(contentStyles, /reasoning-full \.markdown-content \.md-relation,\s*\n#ai-check-window \.hero-summary-full \.markdown-content \.md-relation\s*\{[\s\S]*background:\s*transparent/);
+  assert.match(contentStyles, /reasoning-full \.markdown-content \.md-relation,\s*\n#ai-check-window \.hero-summary-full \.markdown-content \.md-relation\s*\{[\s\S]*border-left:\s*3px solid #c5cfda/);
+  assert.match(contentStyles, /reasoning-full \.markdown-content \.md-relation-support,\s*\n#ai-check-window \.hero-summary-full \.markdown-content \.md-relation-support\s*\{[\s\S]*background:\s*transparent/);
+  assert.match(contentStyles, /reasoning-full \.markdown-content \.md-relation-conflict,\s*\n#ai-check-window \.hero-summary-full \.markdown-content \.md-relation-conflict\s*\{[\s\S]*background:\s*transparent/);
+});
+
+test('AI summary normalization merges 深度洞察 label and body into one heading', () => {
+  const sandbox = {
+    EXT_CONFIG: { API_BASE: 'http://127.0.0.1:8000' },
+    console: { log() {}, warn() {}, error() {} },
+    document: {
+      readyState: 'loading',
+      addEventListener() {},
+      getElementById() { return null; },
+      createElement() { return { style: {}, addEventListener() {}, appendChild() {}, remove() {} }; },
+      createTreeWalker() { return { nextNode() { return null; } }; },
+      body: { appendChild() {} },
+      title: '',
+      querySelector() { return null; },
+    },
+    chrome: { runtime: { onMessage: { addListener() {} } }, storage: { local: {} } },
+    NodeFilter: { SHOW_TEXT: 4, FILTER_REJECT: 2, FILTER_ACCEPT: 1 },
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+    requestAnimationFrame: (fn) => fn(),
+    URL,
+    window: {},
+    globalThis: {},
+  };
+  sandbox.window = sandbox;
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(contentScript, sandbox);
+
+  // 标签独占一行 + 空行 + 段落,常导致前端被切成两张分离卡片
+  const split = sandbox.normalizeAISummaryMarkdown(
+    '- **深度洞察**：\n\n该说法反映了市场对FSD入华的高度期待与真实监管进度之间的信息差。',
+  );
+  assert.match(split, /### 深度洞察\n该说法反映了市场对FSD入华的高度期待/);
+  assert.doesNotMatch(split, /\*\*深度洞察\*\*[：:]/);
+
+  // bullet + 同行内容
+  const inline = sandbox.normalizeAISummaryMarkdown(
+    '- **深度洞察**：信息背后是市场期待与监管进度的差异。\n- **与说法的精确对比**：说法基本准确。',
+  );
+  assert.match(inline, /### 深度洞察\n信息背后是市场期待与监管进度的差异。/);
+  assert.match(inline, /### 与说法的精确对比\n说法基本准确。/);
 });
 
 test('full summary and reasoning details are rendered only after expand click', () => {
@@ -571,6 +618,52 @@ test('reasoning brief prepends actual core evidence count and stance context', (
   assert.match(brief, /相互印证关系/);
 });
 
+test('reasoning brief normalizes model evidence count to displayed cards', () => {
+  const sandbox = {
+    EXT_CONFIG: { API_BASE: 'http://127.0.0.1:8000' },
+    console: { log() {}, warn() {}, error() {} },
+    document: {
+      readyState: 'loading',
+      addEventListener() {},
+      getElementById() { return null; },
+      createElement() { return { style: {}, addEventListener() {}, appendChild() {}, remove() {} }; },
+      createTreeWalker() { return { nextNode() { return null; } }; },
+      body: { appendChild() {} },
+      title: '',
+      querySelector() { return null; },
+    },
+    chrome: { runtime: { onMessage: { addListener() {} } }, storage: { local: {} } },
+    NodeFilter: { SHOW_TEXT: 4, FILTER_REJECT: 2, FILTER_ACCEPT: 1 },
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+    requestAnimationFrame: (fn) => fn(),
+    window: {},
+    globalThis: {},
+  };
+  sandbox.window = sandbox;
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(contentScript, sandbox);
+
+  const reasoning = [
+    '### 3. 证据关系分析',
+    '所有18条核心证据均指向同一结论：该说法属实。多条证据相互印证。',
+  ].join('\n');
+
+  const brief = sandbox.buildReasoningBrief(reasoning, {
+    supporting_evidence: Array.from({ length: 12 }, () => ({})),
+    opposing_evidence: [],
+    neutral_evidence: Array.from({ length: 3 }, () => ({})),
+    total_evidence: 18,
+  });
+
+  assert.match(brief, /^15条核心证据整体指向同一结论/);
+  assert.match(brief, /所有15条核心证据均指向同一结论/);
+  assert.doesNotMatch(brief, /18条核心证据/);
+});
+
 test('reasoning display filters redundant per-evidence stance section', () => {
   const sandbox = {
     EXT_CONFIG: { API_BASE: 'http://127.0.0.1:8000' },
@@ -623,6 +716,54 @@ test('reasoning display filters redundant per-evidence stance section', () => {
   assert.match(display, /### 综合判断/);
   assert.match(display, /### 证据关系分析/);
   assert.match(display, /### 不确定性与局限/);
+});
+
+test('reasoning display normalizes model evidence count to displayed cards', () => {
+  const sandbox = {
+    EXT_CONFIG: { API_BASE: 'http://127.0.0.1:8000' },
+    console: { log() {}, warn() {}, error() {} },
+    document: {
+      readyState: 'loading',
+      addEventListener() {},
+      getElementById() { return null; },
+      createElement() { return { style: {}, addEventListener() {}, appendChild() {}, remove() {} }; },
+      createTreeWalker() { return { nextNode() { return null; } }; },
+      body: { appendChild() {} },
+      title: '',
+      querySelector() { return null; },
+    },
+    chrome: { runtime: { onMessage: { addListener() {} } }, storage: { local: {} } },
+    NodeFilter: { SHOW_TEXT: 4, FILTER_REJECT: 2, FILTER_ACCEPT: 1 },
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+    requestAnimationFrame: (fn) => fn(),
+    window: {},
+    globalThis: {},
+  };
+  sandbox.window = sandbox;
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(contentScript, sandbox);
+
+  const reasoning = [
+    '### 2. 综合判断',
+    '所有18条核心证据均指向同一结论：该说法属实。',
+    '### 3. 证据关系分析',
+    '18条核心证据整体指向同一结论，其中部分证据提供限定或背景。',
+  ].join('\n');
+
+  const display = sandbox.buildReasoningDisplayContent(reasoning, {
+    supporting_evidence: Array.from({ length: 12 }, () => ({})),
+    opposing_evidence: [],
+    neutral_evidence: Array.from({ length: 3 }, () => ({})),
+    total_evidence: 18,
+  });
+
+  assert.match(display, /所有15条核心证据均指向同一结论/);
+  assert.match(display, /15条核心证据整体指向同一结论/);
+  assert.doesNotMatch(display, /18条核心证据/);
 });
 
 test('evidence cards show source summary instead of model analysis', () => {
@@ -749,7 +890,7 @@ test('evidence cards expose stable anchors and reasoning mentions link to them',
     title: '报道A',
     content: { summary: '第一条证据摘要' },
   }, 'support', 0, 3);
-  const reasoningHtml = sandbox.parseMarkdown('证据1和证据 2共同印证，证据[3]提供限定，证据4-5仍需核对。');
+  const reasoningHtml = sandbox.parseMarkdown('证据1和证据 2共同印证，证据[3]提供限定，证据4-5仍需核对。证据 1、5、7、8提供校方回复，证据 3、4、10、11、12形成交叉印证。');
 
   assert.match(cardHtml, /id="evidence-3"/);
   assert.match(cardHtml, /data-evidence-index="3"/);
@@ -759,6 +900,31 @@ test('evidence cards expose stable anchors and reasoning mentions link to them',
   assert.match(reasoningHtml, /href="#evidence-3" class="evidence-anchor-link"/);
   assert.match(reasoningHtml, /href="#evidence-4" class="evidence-anchor-link"/);
   assert.match(reasoningHtml, /href="#evidence-5" class="evidence-anchor-link"/);
+  assert.match(reasoningHtml, /href="#evidence-7" class="evidence-anchor-link"/);
+  assert.match(reasoningHtml, /href="#evidence-8" class="evidence-anchor-link"/);
+  assert.match(reasoningHtml, /href="#evidence-10" class="evidence-anchor-link"/);
+  assert.match(reasoningHtml, /href="#evidence-11" class="evidence-anchor-link"/);
+  assert.match(reasoningHtml, /href="#evidence-12" class="evidence-anchor-link"/);
+});
+
+test('evidence anchor clicks are handled inside the extension modal', () => {
+  assert.match(contentScript, /function handleEvidenceAnchorClick\(event\)/);
+  assert.match(contentScript, /event\.preventDefault\(\)/);
+  assert.match(contentScript, /activateResultTab\(resultRoot, 'evidence'\)/);
+  assert.match(contentScript, /function getEvidenceScrollContainer\(\)/);
+  assert.match(contentScript, /scrollTo\(\{ top: Math\.max\(0, offset\), behavior: 'smooth' \}\)/);
+  assert.match(contentScript, /classList\.add\('evidence-card-jump'\)/);
+  assert.match(contentStyles, /\.evidence-card-jump/);
+});
+
+test('evidence anchor jumps expose a return control', () => {
+  assert.match(contentScript, /function showEvidenceReturnButton\(target, resultRoot, returnState\)/);
+  assert.match(contentScript, /button\.textContent = '返回引用位置'/);
+  assert.match(contentScript, /activateResultTab\(resultRoot, returnState\.tab\)/);
+  assert.match(contentScript, /scrollTo\(\{ top: returnState\.scrollTop, behavior: 'smooth' \}\)/);
+  assert.match(contentScript, /evidence-anchor-return-focus/);
+  assert.match(contentStyles, /\.evidence-return-link/);
+  assert.match(contentStyles, /\.evidence-anchor-return-focus/);
 });
 
 test('relation styling treats negated conflicts with consistency wording as support', () => {
@@ -791,7 +957,7 @@ test('relation styling treats negated conflicts with consistency wording as supp
   vm.createContext(sandbox);
   vm.runInContext(contentScript, sandbox);
 
-  const html = sandbox.parseMarkdown('展示的9条核心证据中，多数形成了高度一致的证据链，在核心事实上完全吻合，无任何矛盾。');
+  const html = sandbox.parseMarkdown('所有30条核心证据均对该说法构成支持，没有任何证据提出质疑或反驳。展示的9条核心证据中，多数形成了高度一致的证据链，在核心事实上完全吻合，无任何矛盾。');
 
   assert.match(html, /md-relation-support/);
   assert.doesNotMatch(html, /md-relation-conflict/);
@@ -828,6 +994,42 @@ test('relation styling treats no major conflict wording as support', () => {
   vm.runInContext(contentScript, sandbox);
 
   const html = sandbox.parseMarkdown('多数内容高度一致，信息细节无重大矛盾，共同形成了一个密实且可靠的证据链。');
+
+  assert.match(html, /md-relation-support/);
+  assert.doesNotMatch(html, /md-relation-conflict/);
+});
+
+test('relation styling treats positive verdicts mentioning 核心矛盾 as support', () => {
+  const sandbox = {
+    EXT_CONFIG: { API_BASE: 'http://127.0.0.1:8000' },
+    console: { log() {}, warn() {}, error() {} },
+    document: {
+      readyState: 'loading',
+      addEventListener() {},
+      getElementById() { return null; },
+      createElement() { return { style: {}, addEventListener() {}, appendChild() {}, remove() {} }; },
+      createTreeWalker() { return { nextNode() { return null; } }; },
+      body: { appendChild() {} },
+      title: '',
+      querySelector() { return null; },
+    },
+    chrome: { runtime: { onMessage: { addListener() {} } }, storage: { local: {} } },
+    NodeFilter: { SHOW_TEXT: 4, FILTER_REJECT: 2, FILTER_ACCEPT: 1 },
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+    requestAnimationFrame: (fn) => fn(),
+    URL,
+    window: {},
+    globalThis: {},
+  };
+  sandbox.window = sandbox;
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(contentScript, sandbox);
+
+  const html = sandbox.parseMarkdown('待核查说法准确概括了事件的核心矛盾。说法中的"天天上课"与报道中的"天天坚持去上课"基本相符；说法未歪曲或夸大事件，是一个简洁的事件描述。');
 
   assert.match(html, /md-relation-support/);
   assert.doesNotMatch(html, /md-relation-conflict/);

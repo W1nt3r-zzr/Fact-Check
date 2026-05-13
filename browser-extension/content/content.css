@@ -439,6 +439,11 @@
   box-shadow: 0 0 0 3px rgba(26, 115, 232, 0.16), 0 4px 14px rgba(26, 115, 232, 0.12);
 }
 
+.evidence-card-jump {
+  border-color: #1a73e8;
+  box-shadow: 0 0 0 3px rgba(26, 115, 232, 0.16), 0 4px 14px rgba(26, 115, 232, 0.12);
+}
+
 .evidence-header {
   display: flex;
   align-items: center;
@@ -490,6 +495,28 @@
 .evidence-anchor-link:hover {
   color: #1557b0;
   border-bottom-color: #1557b0;
+}
+
+.evidence-anchor-return-focus {
+  background: rgba(26, 115, 232, 0.12);
+  border-radius: 4px;
+}
+
+.evidence-return-link {
+  margin-top: 12px;
+  padding: 6px 10px;
+  border: 1px solid rgba(26, 115, 232, 0.35);
+  border-radius: 7px;
+  background: #ffffff;
+  color: #1a73e8;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.evidence-return-link:hover {
+  background: #f4f8ff;
+  border-color: #1a73e8;
 }
 
 .evidence-stance-badge.stance-support {
@@ -1140,6 +1167,42 @@
   margin-bottom: 12px;
   line-height: 1.5;
 }
+
+.all-sources-row {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed #c7d2e8;
+  font-size: 14px;
+  line-height: 1.6;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  align-items: baseline;
+}
+
+.all-sources-label {
+  color: #6b7f99;
+  font-weight: 500;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.all-sources-list {
+  color: #4b5563;
+}
+
+.all-source-item {
+  display: inline;
+  color: #34506b;
+  font-weight: 500;
+}
+
+.all-source-item:hover {
+  color: #1967d2;
+  text-decoration: underline;
+  cursor: default;
+}
+
 .stats-row {
   display: flex;
   gap: 12px;
@@ -1382,6 +1445,106 @@
 #ai-check-window .hero-summary-full .markdown-content .md-h3:first-child,
 #ai-check-window .hero-summary-full .markdown-content .md-h2:first-child {
   margin-top: 0;
+}
+
+/* 详细报告：保留关系提示，但避免长段落被做成厚重卡片。 */
+.reasoning-full .markdown-content .md-relation,
+#ai-check-window .hero-summary-full .markdown-content .md-relation {
+  margin: 8px 0 14px;
+  padding: 0 0 0 14px;
+  border: 0;
+  border-left: 3px solid #c5cfda;
+  border-radius: 0;
+  background: transparent;
+  list-style-position: outside;
+}
+
+.reasoning-full .markdown-content .md-relation-support,
+#ai-check-window .hero-summary-full .markdown-content .md-relation-support {
+  border-left-color: #2e7d47;
+  background: transparent;
+}
+
+.reasoning-full .markdown-content .md-relation-conflict,
+#ai-check-window .hero-summary-full .markdown-content .md-relation-conflict {
+  border-left-color: #b3261e;
+  background: transparent;
+}
+
+.reasoning-full .markdown-content .md-relation-support::before,
+#ai-check-window .hero-summary-full .markdown-content .md-relation-support::before,
+.reasoning-full .markdown-content .md-relation-conflict::before,
+#ai-check-window .hero-summary-full .markdown-content .md-relation-conflict::before {
+  margin-right: 8px;
+  padding: 1px 7px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.45;
+  vertical-align: 2px;
+}
+
+/* AI归纳总结详细报告：使用连续审阅文档版式，与证据解读保持统一轻量标注。 */
+#ai-check-window .hero-summary-full > .markdown-content {
+  display: block;
+}
+
+#ai-check-window .hero-summary-full .markdown-content .md-h2,
+#ai-check-window .hero-summary-full .markdown-content .md-h3,
+#ai-check-window .hero-summary-full .markdown-content .md-h4 {
+  display: block;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  letter-spacing: 0;
+}
+
+#ai-check-window .hero-summary-full .markdown-content .md-h2,
+#ai-check-window .hero-summary-full .markdown-content .md-h3 {
+  margin: 22px 0 10px;
+  padding: 0 0 8px;
+  border-bottom: 1px solid #dfe6ee;
+  color: #1f2937;
+  font-size: 16px;
+  line-height: 1.45;
+}
+
+#ai-check-window .hero-summary-full .markdown-content .md-h2:first-child,
+#ai-check-window .hero-summary-full .markdown-content .md-h3:first-child {
+  margin-top: 0;
+}
+
+#ai-check-window .hero-summary-full .markdown-content .md-h4 {
+  margin: 16px 0 8px;
+  padding: 0;
+  color: #2f4f3a;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+#ai-check-window .hero-summary-full .markdown-content .md-p {
+  margin: 0 0 13px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #374151;
+  line-height: 1.82;
+}
+
+#ai-check-window .hero-summary-full .markdown-content .md-ul,
+#ai-check-window .hero-summary-full .markdown-content .md-ol {
+  margin: 8px 0 16px;
+  padding: 0 0 0 24px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+#ai-check-window .hero-summary-full .markdown-content .md-li {
+  margin: 7px 0;
+  padding-left: 4px;
+  line-height: 1.78;
 }
 
 /* ========== Stance Tags (inline badges in markdown) ========== */

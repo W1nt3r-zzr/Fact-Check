@@ -106,9 +106,6 @@ check_required_files() {
     "browser-extension/manifest.json"
     "browser-extension/config.js"
     "browser-extension/background.js"
-    "browser-extension/newtab/newtab.html"
-    "browser-extension/newtab/newtab.css"
-    "browser-extension/newtab/newtab.js"
     "browser-extension/content/content.js"
     "browser-extension/content/content.css"
     "browser-extension/popup/popup.html"
@@ -137,19 +134,19 @@ check_required_files() {
 
 check_release_sources_tracked() {
   local untracked
-  untracked="$(git status --short browser-extension backend/services/task_queue.py backend/tests/test_task_queue.py | awk '$1 == "??" {print $2}')"
+  untracked="$(git status --short browser-extension backend/routers backend/services backend/tests/test_task_queue.py backend/tests/test_fact_check_evidence_limit.py backend/tests/test_search_rules.py | awk '$1 == "??" {print $2}')"
   if [[ -n "$untracked" ]]; then
-    echo "Untracked release-critical files exist. Add or ignore them before publishing:" >&2
+    echo "存在未跟踪的发布关键文件。发布前请先加入 Git 或忽略：" >&2
     echo "$untracked" >&2
     exit 1
   fi
 }
 
 run_tests() {
-  section "Running browser-extension tests"
+  section "运行浏览器插件测试"
   node --test browser-extension/tests/*.test.js
 
-  section "Running backend queue/search tests"
+  section "运行后端队列、证据与搜索测试"
   python3 -m pytest \
     backend/tests/test_task_queue.py \
     backend/tests/test_fact_check_evidence_limit.py \
@@ -157,7 +154,7 @@ run_tests() {
 }
 
 build_zip() {
-  section "Building $ZIP_PATH"
+  section "构建插件压缩包 $ZIP_PATH"
   mkdir -p release
   rm -f "$ZIP_PATH"
   (
@@ -167,8 +164,8 @@ build_zip() {
 }
 
 verify_zip() {
-  section "Verifying ZIP contents"
-  unzip -p "$ZIP_PATH" manifest.json | python3 -c "import json,sys; data=json.load(sys.stdin); assert data['version'] == '$VERSION', data['version']; print('zip manifest version ok')"
+  section "校验插件压缩包内容"
+  unzip -p "$ZIP_PATH" manifest.json | python3 -c "import json,sys; data=json.load(sys.stdin); assert data['version'] == '$VERSION', data['version']; print('zip manifest 版本校验通过')"
   local config_js
   local content_js
   local content_css
@@ -185,66 +182,66 @@ verify_zip() {
   [[ "$content_css" == *".queue-status"* ]]
   [[ "$zip_entries" == *"utils/markdown.js"* ]]
   [[ "$zip_entries" == *"utils/highlight.js"* ]]
-  [[ "$zip_entries" == *"newtab/newtab.html"* ]]
-  [[ "$zip_entries" == *"newtab/newtab.css"* ]]
-  [[ "$zip_entries" == *"newtab/newtab.js"* ]]
-  echo "zip queue-status frontend ok"
+  echo "zip 队列状态前端资源校验通过"
 }
 
 commit_and_publish() {
-  section "Preparing publish"
+  section "准备发布"
   check_release_sources_tracked
 
   if [[ ! -x "$GH_BIN" ]]; then
-    echo "GitHub CLI not found or not executable: $GH_BIN" >&2
+    echo "找不到 GitHub CLI，或文件不可执行：$GH_BIN" >&2
     exit 1
   fi
 
   if [[ -n "$RELEASE_NOTES_FILE" && ! -f "$RELEASE_NOTES_FILE" ]]; then
-    echo "Release notes file not found: $RELEASE_NOTES_FILE" >&2
+    echo "找不到发布说明文件：$RELEASE_NOTES_FILE" >&2
     exit 1
   fi
 
   if git rev-parse "$TAG" >/dev/null 2>&1; then
-    echo "Tag already exists locally: $TAG" >&2
+    echo "本地标签已存在：$TAG" >&2
     exit 1
   fi
 
   if git ls-remote --exit-code --tags "$GIT_REMOTE" "$TAG" >/dev/null 2>&1; then
-    echo "Tag already exists on remote: $TAG" >&2
+    echo "远端标签已存在：$TAG" >&2
     exit 1
   fi
 
-  section "Committing release sources"
+  section "提交发布源码"
+  # 发布包依赖前端插件与后端服务接口协同工作。凡涉及后端服务的改动，
+  # 必须随插件版本一起提交并推送，避免线上前端与后端字段不一致。
   git add \
     browser-extension \
     backend/config.py \
-    backend/routers/fact_check.py \
-    backend/services/llm_service.py \
-    backend/services/task_queue.py \
+    backend/routers \
+    backend/services \
     backend/tests/test_task_queue.py \
+    backend/tests/test_fact_check_evidence_limit.py \
+    backend/tests/test_search_rules.py \
     RELEASE_CHECKLIST.md \
     DEPLOYMENT.md \
     scripts/release_browser_extension.sh \
     .gitignore
 
   if git diff --cached --quiet; then
-    echo "No staged changes to commit."
+    echo "没有可提交的发布改动。"
   else
     git commit -m "发布浏览器插件 $TAG"
   fi
 
-  section "Tagging and pushing"
+  section "打标签并推送"
   git tag "$TAG"
   git push "$GIT_REMOTE" main
   git push "$GIT_REMOTE" "$TAG"
 
-  section "Creating GitHub Release"
+  section "创建 GitHub Release"
   local notes_args
   if [[ -n "$RELEASE_NOTES_FILE" ]]; then
     notes_args=(--notes-file "$RELEASE_NOTES_FILE")
   else
-    notes_args=(--notes "发布 browser-extension $TAG。请在发布前通过 RELEASE_NOTES_FILE 提供本次修改、修复和更新内容。")
+    notes_args=(--notes "发布浏览器插件 $TAG。本次发布会同步推送插件前端与相关后端服务改动，确保线上字段、证据展示和版本号保持一致。请在正式发布前通过 RELEASE_NOTES_FILE 补充更详细的中文发布说明。")
   fi
 
   "$GH_BIN" release create "$TAG" "$ZIP_PATH" \
@@ -253,21 +250,21 @@ commit_and_publish() {
     "${notes_args[@]}" \
     --latest
 
-  section "Waiting for Railway queue endpoint"
+  section "等待 Railway 队列接口恢复"
   for attempt in {1..18}; do
     if curl -fsS "$BACKEND_QUEUE_URL" | grep -q '"max_concurrent"'; then
-      echo "Railway queue endpoint ok"
+      echo "Railway 队列接口校验通过"
       return 0
     fi
-    echo "Railway not ready yet ($attempt/18); waiting 10s..."
+    echo "Railway 暂未就绪（$attempt/18），等待 10 秒..."
     sleep 10
   done
 
-  echo "Railway queue endpoint did not verify in time: $BACKEND_QUEUE_URL" >&2
+  echo "Railway 队列接口未在预期时间内通过校验：$BACKEND_QUEUE_URL" >&2
   exit 1
 }
 
-section "Checking required tools and files"
+section "检查必需工具和文件"
 require_cmd git
 require_cmd node
 require_cmd python3
@@ -284,7 +281,7 @@ verify_zip
 if [[ "$PUBLISH" -eq 1 ]]; then
   commit_and_publish
 else
-  section "Dry run complete"
-  echo "Built: $ZIP_PATH"
-  echo "Run with --publish to commit, tag, push, create GitHub Release, and verify Railway."
+  section "预演完成"
+  echo "已构建：$ZIP_PATH"
+  echo "使用 --publish 可提交、打标签、推送、创建 GitHub Release，并校验 Railway。"
 fi
