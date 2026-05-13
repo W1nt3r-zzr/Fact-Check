@@ -138,14 +138,15 @@ class FactCheckEvidenceLimitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["top_k"], 12)
         self.assertEqual(response.evidence_chain["total_evidence"], 12)
 
-    async def test_core_evidence_selection_keeps_safety_cap_for_large_candidate_sets(self):
+    async def test_core_evidence_selection_keeps_reduced_safety_cap_for_large_candidate_sets(self):
         selected = fact_check_router._select_core_evidence(
             "使用表情包被索赔1万元",
             [_result(i) for i in range(35)],
         )
 
         self.assertEqual(len(selected), fact_check_router.CORE_EVIDENCE_LIMIT)
-        self.assertEqual(fact_check_router.CORE_EVIDENCE_LIMIT, 30)
+        self.assertEqual(fact_check_router.CORE_EVIDENCE_LIMIT, 18)
+        self.assertEqual(fact_check_router.HOMOGENEOUS_EVIDENCE_PER_CLUSTER, 3)
 
     async def test_core_evidence_selection_drops_stale_low_relevance_before_prompt_and_chain(self):
         captured = {}
@@ -244,8 +245,8 @@ class FactCheckEvidenceLimitTests(unittest.IsolatedAsyncioTestCase):
             fresh_results + [stale_history],
         )
 
-        self.assertEqual(len(selected), 9)
-        self.assertEqual([item.name for item in selected], [item.name for item in fresh_results])
+        self.assertEqual(len(selected), fact_check_router.HOMOGENEOUS_EVIDENCE_PER_CLUSTER)
+        self.assertEqual([item.name for item in selected], [item.name for item in fresh_results[:3]])
         self.assertNotIn(stale_history.name, [item.name for item in selected])
 
     async def test_core_evidence_selection_prefers_authoritative_same_fact_over_early_reposts(self):
@@ -290,7 +291,8 @@ class FactCheckEvidenceLimitTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(cctv.name, selected_titles)
         self.assertIn(consulate.name, selected_titles)
         self.assertNotIn(speculative.name, selected_titles)
-        self.assertEqual(len(selected), 12)
+        self.assertLessEqual(len(selected), 5)
+        self.assertLess(len(selected), len(reposts) + 2)
 
     async def test_model_reasoning_evidence_count_is_normalized_to_core_evidence_count(self):
         async def fake_generate_evidence_chain(**kwargs):

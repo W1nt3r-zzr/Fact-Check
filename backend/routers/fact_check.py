@@ -21,9 +21,11 @@ from services.task_queue import FactCheckTaskQueue
 
 router = APIRouter()
 
-# This is a safety cap, not a target. Relevant evidence below this cap should
-# all enter model reasoning and the evidence chain instead of being cut to 10.
-CORE_EVIDENCE_LIMIT = 30
+# Keep the reasoning context bounded. Search can return many syndicated or
+# lightly rewritten reports; only representative sources should enter the LLM
+# prompt and evidence chain.
+CORE_EVIDENCE_LIMIT = 18
+HOMOGENEOUS_EVIDENCE_PER_CLUSTER = 3
 
 _llm_client = None
 _link_validator = None
@@ -138,6 +140,80 @@ def _deduplicate_core_results(results: List[SearchResult]) -> List[SearchResult]
     return deduped
 
 
+def _compact_for_similarity(text: str) -> str:
+    compact = (text or "").lower()
+    compact = re.sub(r"https?://\S+", "", compact)
+    compact = re.sub(r"第\s*\d+\s*条", "", compact)
+    compact = re.sub(r"\d{4}[-年/]\d{1,2}[-月/]\d{0,2}日?", "", compact)
+    compact = re.sub(r"[^\w一-龥]+", "", compact)
+    return compact
+
+
+def _char_ngrams(text: str, n: int = 3) -> set[str]:
+    compact = _compact_for_similarity(text)
+    if len(compact) <= n:
+        return {compact} if compact else set()
+    return {compact[i:i + n] for i in range(len(compact) - n + 1)}
+
+
+def _jaccard_similarity(left: set[str], right: set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    return len(left & right) / len(left | right)
+
+
+def _is_homogeneous_evidence(left: SearchResult, right: SearchResult) -> bool:
+    """Detect same-fact reposts/rewrites that should not all consume LLM tokens."""
+    left_compact = _compact_for_similarity(f"{left.name} {left.summary}")
+    right_compact = _compact_for_similarity(f"{right.name} {right.summary}")
+    if min(len(left_compact), len(right_compact)) < 36:
+        return False
+
+    left_title = _normalize_title_for_source_dedup(left.name)
+    right_title = _normalize_title_for_source_dedup(right.name)
+    if left_title and right_title:
+        title_sets = (_char_ngrams(left_title, 2), _char_ngrams(right_title, 2))
+        if _jaccard_similarity(*title_sets) >= 0.72:
+            return True
+
+    left_text = f"{left.name} {left.summary}"
+    right_text = f"{right.name} {right.summary}"
+    left_ngrams = _char_ngrams(left_text, 3)
+    right_ngrams = _char_ngrams(right_text, 3)
+    return _jaccard_similarity(left_ngrams, right_ngrams) >= 0.58
+
+
+def _compress_homogeneous_core_results(
+    ranked_results: List[SearchResult],
+    max_per_cluster: int = HOMOGENEOUS_EVIDENCE_PER_CLUSTER,
+) -> List[SearchResult]:
+    """Keep only a few ranked representatives from each same-fact evidence cluster."""
+    clusters: list[list[SearchResult]] = []
+    selected: list[SearchResult] = []
+
+    for result in ranked_results:
+        matched_cluster = None
+        for cluster in clusters:
+            if any(_is_homogeneous_evidence(result, existing) for existing in cluster):
+                matched_cluster = cluster
+                break
+
+        if matched_cluster is None:
+            clusters.append([result])
+            selected.append(result)
+            continue
+
+        matched_cluster.append(result)
+        if len(matched_cluster) <= max_per_cluster:
+            selected.append(result)
+        else:
+            logger.info(f"核心证据同质压缩：跳过同事实重复报道「{result.name[:60]}...」")
+
+    if len(selected) < len(ranked_results):
+        logger.info(f"核心证据同质压缩：{len(ranked_results)} → {len(selected)}")
+    return selected
+
+
 def _core_evidence_quality_score(claim: str, result: SearchResult) -> float:
     text = f"{result.name} {result.summary} {result.source} {result.url}"
     score = 0.0
@@ -235,9 +311,11 @@ def _select_core_evidence(claim: str, search_results: List[SearchResult]) -> Lis
     if not filtered and not _is_time_sensitive_claim(claim):
         logger.info("核心证据复筛无结果，非时效敏感claim回退到原始Top N")
         deduped = _drop_speculative_core_results(_deduplicate_core_results(search_results))
-        return _rank_core_results(claim, deduped)[:CORE_EVIDENCE_LIMIT]
+        ranked = _rank_core_results(claim, deduped)
+        return _compress_homogeneous_core_results(ranked)[:CORE_EVIDENCE_LIMIT]
     deduped = _drop_speculative_core_results(_deduplicate_core_results(filtered))
-    return _rank_core_results(claim, deduped)[:CORE_EVIDENCE_LIMIT]
+    ranked = _rank_core_results(claim, deduped)
+    return _compress_homogeneous_core_results(ranked)[:CORE_EVIDENCE_LIMIT]
 
 
 @router.post("/api/v1/check/stream")
