@@ -72,11 +72,11 @@ test('parseMarkdown decorates opposing stance', () => {
   assert.match(html, /<span class="stance-tag stance-oppose">反对<\/span>/);
 });
 
-test('parseMarkdown treats negated conflict wording as support', () => {
+test('parseMarkdown does not auto-decorate relation wording', () => {
   const html = parseMarkdown(
     '所有10条核心证据中，除证据9（虎扑）讨论的是非法改装这一不相干话题外，其余所有的核心证据均高度一致地指向同一事件，核心事实在所有相关证据中完全吻合，无任何矛盾之处。',
   );
 
-  assert.match(html, /md-relation-support/);
+  assert.doesNotMatch(html, /md-relation-support/);
   assert.doesNotMatch(html, /md-relation-conflict/);
 });

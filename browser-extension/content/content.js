@@ -1069,12 +1069,7 @@ function displayResult(data, originalClaim) {
        (data.evidence_chain.neutral_evidence?.length || 0));
     const summaryMeta = summaryEvidenceCount > 0 ? `基于 ${summaryEvidenceCount} 条核心证据` : '综合证据分析';
 
-    // 完整报告中去除开头摘要部分，避免重复
-    if (summaryFull && summaryBrief && summaryFull.startsWith(summaryBrief)) {
-      summaryFull = summaryFull.substring(summaryBrief.length).trim();
-      // 去掉开头的换行和标点
-      summaryFull = summaryFull.replace(/^[\n\r\s，,。.、]+/, '');
-    }
+    summaryFull = stripAISummaryOpeningSummary(summaryFull, summaryBrief);
     summaryDetailMarkdown = normalizeAISummaryMarkdown(summaryFull);
 
     html += `
@@ -1124,7 +1119,7 @@ function displayResult(data, originalClaim) {
   if (totalEvidence > 0) {
     // 证据检索与质量说明
     const totalSearchResults = ec?.total_search_results || 0;
-    html += buildEvidenceOverviewHtml(totalSearchResults, totalEvidence, ec?.reasoning_summary, ec?.all_search_results);
+    html += buildEvidenceOverviewHtml(totalSearchResults, totalEvidence, ec?.reasoning_summary);
 
     html += `
       <div class="stats-row">
@@ -1202,6 +1197,8 @@ function displayResult(data, originalClaim) {
 
   html += '</div>'; // 关闭最后一个 tab-content
 
+  html += buildAllSourcesHtml(ec?.all_search_results);
+
   // 收起到侧边栏按钮
   html += '<div style="margin-top: 16px; padding-top: 16px; border-top: 1px solid #e8eaed; text-align: center;">';
   html += '<button class="collapse-to-sidebar-btn" id="collapseToSidebarBtn">收起到侧边栏</button>';
@@ -1278,8 +1275,8 @@ function highlightKeyContent(container, data, claim) {
   const keywords = extractHighlightKeywords(claim, data, container.textContent || '');
   if (keywords.length === 0) return;
   const highlightStats = new WeakMap();
-  const MAX_HIGHLIGHTS_IN_FULL_REPORT = 160;
-  const MAX_HIGHLIGHTS_PER_FULL_REPORT_BLOCK = 10;
+  const MAX_HIGHLIGHTS_IN_FULL_REPORT = 220;
+  const MAX_HIGHLIGHTS_PER_FULL_REPORT_BLOCK = 14;
 
   // 2. 在指定容器内的文本节点中高亮
   const walker = document.createTreeWalker(
@@ -1438,7 +1435,7 @@ function findKeywordMatches(content, keyword) {
   return matches.sort((a, b) => a.start - b.start || b.end - a.end);
 }
 
-function buildEvidenceOverviewHtml(totalSearchResults, totalEvidence, reasoningSummary, allSearchResults) {
+function buildEvidenceOverviewHtml(totalSearchResults, totalEvidence, reasoningSummary) {
   const lines = [];
   if (totalSearchResults > totalEvidence) {
     lines.push(`检索到 ${totalSearchResults} 个结果，其中 ${totalEvidence} 个与待核查说法匹配度较高，已作为核心证据进行分析；其余结果可能为重复转载、背景信息或相关性较弱内容。`);
@@ -1451,32 +1448,53 @@ function buildEvidenceOverviewHtml(totalSearchResults, totalEvidence, reasoningS
     lines.push(qualitySummary);
   }
 
-  let allSourcesHtml = '';
+  return lines.length
+    ? `<div class="evidence-retrieval-info">📊 ${lines.map(line => renderInlineMarkdown(line)).join('<br>')}</div>`
+    : '';
+}
+
+function buildAllSourcesHtml(allSearchResults) {
   if (Array.isArray(allSearchResults) && allSearchResults.length > 0) {
-    const uniqueDomains = [];
+    const sources = [];
     const seen = new Set();
     allSearchResults.forEach(r => {
       const domain = r.domain || '';
-      if (domain && !seen.has(domain)) {
-        seen.add(domain);
-        uniqueDomains.push({ domain, title: r.title || '' });
+      const title = String(r.title || '').trim();
+      const url = String(r.url || '').trim();
+      const key = url || `${domain}:${title}`;
+      if ((domain || title) && !seen.has(key)) {
+        seen.add(key);
+        sources.push({ domain, title, url });
       }
     });
-    if (uniqueDomains.length > 0) {
-      const sourceItems = uniqueDomains.map((item, idx) =>
-        `<span class="all-source-item" title="${escapeHtml(item.title)}">${escapeHtml(item.domain)}</span>`
-      ).join(' · ');
-      allSourcesHtml = `
-        <div class="all-sources-row">
-          <span class="all-sources-label">全部来源</span>
-          <span class="all-sources-list">${sourceItems}</span>
-        </div>`;
+    if (sources.length > 0) {
+      const visibleLimit = 6;
+      const renderSourceItem = (item) => {
+        const name = item.title || item.domain || '未命名来源';
+        const label = escapeHtml(name.length > 34 ? `${name.slice(0, 33)}...` : name);
+        const meta = item.domain ? `<span class="all-source-domain">${escapeHtml(item.domain)}</span>` : '';
+        const content = `<span class="all-source-name">${label}</span>${meta}`;
+        return item.url
+          ? `<a class="all-source-item" href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(name)}">${content}</a>`
+          : `<span class="all-source-item" title="${escapeHtml(name)}">${content}</span>`;
+      };
+      const visibleItems = sources.slice(0, visibleLimit).map(renderSourceItem).join('');
+      const hiddenItems = sources.slice(visibleLimit).map(renderSourceItem).join('');
+      const hiddenHtml = hiddenItems
+        ? `<details class="all-sources-more">
+            <summary>展开其余 ${sources.length - visibleLimit} 个来源</summary>
+            <div class="all-sources-list all-sources-list-more">${hiddenItems}</div>
+          </details>`
+        : '';
+      return `
+        <section class="all-sources-panel" aria-label="检索来源">
+          <div class="all-sources-heading">检索来源</div>
+          <div class="all-sources-list">${visibleItems}</div>
+          ${hiddenHtml}
+        </section>`;
     }
   }
-
-  return lines.length
-    ? `<div class="evidence-retrieval-info">📊 ${lines.map(line => renderInlineMarkdown(line)).join('<br>')}${allSourcesHtml}</div>`
-    : '';
+  return '';
 }
 
 function stripEvidenceCountLead(text) {
@@ -1521,6 +1539,7 @@ function extractHighlightKeywords(claim, data, reportText = '') {
   function addKeyword(value, priority = 10) {
     const kw = String(value || '').trim().replace(/^[，,。.！!？?；;：:、\s]+|[，,。.！!？?；;：:、\s]+$/g, '');
     if (kw.length < 2 || stopWords.has(kw)) return;
+    if (isStructuralHighlightKeyword(kw)) return;
     if (/^[年月日元万亿元%％]+$/.test(kw)) return;
     if (/^(?:核心事实提取|终审结果确定|最终判决内容|关键量刑情节|案件性质)$/.test(kw)) return;
     if (/^(?:并|和|与|及)/.test(kw) || /(?:并|和|与|及)$/.test(kw)) return;
@@ -1529,8 +1548,40 @@ function extractHighlightKeywords(claim, data, reportText = '') {
     kwPriority.set(kw, Math.max(kwPriority.get(kw) || 0, priority));
   }
 
+  function isStructuralHighlightKeyword(kw) {
+    const normalized = String(kw || '').replace(/\s+/g, '');
+    if (/^\d+(?:\.\d+)?条$/.test(normalized)) return true;
+    if (/^(?:\d+)?条核心证据$/.test(normalized)) return true;
+    if (/(?:核心)?证据(?:均|整体|都|相互)?(?:支持|指向|构成|结论|一致|印证)/.test(normalized)) return true;
+    if (/(?:所有|全部|多数|多条|其他大部分)(?:信息|证据|来源)?(?:均|都)?(?:指向|支持|印证|构成)/.test(normalized)) return true;
+    if (/(?:同一结论|均指向同一结论|信息均指向同一结论|整体指向同一结论)/.test(normalized)) return true;
+    if (/(?:专家解读文章|主要独立报道源头|不能完全视为多方独立核实|多来源独立性|相互印证关系|证据链|核心事实|关键事实)$/.test(normalized)) return true;
+    return false;
+  }
+
   function collectImportantTerms(text, priority = 70) {
     if (!text) return;
+    (text.match(/《[^《》]{4,34}》/g) || [])
+      .forEach(e => {
+        const title = e.replace(/[《》]/g, '');
+        addKeyword(e, priority + 12);
+        if (/(?:标准|办法|规定|通知|意见|方案|条例|报告|公告|通报|草案|征求意见稿)/.test(title)) {
+          addKeyword(title, priority + 11);
+        }
+      });
+    (text.match(/[“"][^”"]{4,28}[”"]/g) || [])
+      .forEach(e => {
+        const quoted = e.replace(/[“”"]/g, '');
+        if (/(?:预制菜|中央厨房|跨省共济|医保钱包|个人账户|国家标准|生产标准|检测规范|共享|开通|排除|纳入|不算|不属于)/.test(quoted)) {
+          addKeyword(quoted, priority + 9);
+        }
+      });
+    (text.match(/[一-鿿]{2,24}(?:征求意见稿|管理办法|实施方案|国家标准|行业标准|统一标准|生产标准|检测规范|监管规范|新国标|医保钱包|跨省共济|个人账户跨省共济)/g) || [])
+      .forEach(e => addKeyword(e, priority + 10));
+    (text.match(/(?:拟将|确拟将|明确将|规定将|要求将|已将|将)[^，。,；;：:\n]{2,24}(?:排除|纳入|列为|开通|共享|划扣|绑定)[^，。,；;：:\n]{0,18}/g) || [])
+      .forEach(e => addKeyword(e, priority + 8));
+    (text.match(/(?:钱可以共济|卡不能共用|家人可以直接共享|中央厨房制作的菜肴|不纳入预制菜范围|排除在预制菜定义范围之外|所有省份开通职工医保个人账户跨省共济)/g) || [])
+      .forEach(e => addKeyword(e, priority + 9));
     (text.match(/\d{4}年(?:至|到|-|—)\d{4}年(?:间|期间)?/g) || [])
       .forEach(e => {
         addKeyword(e, priority + 8);
@@ -1623,9 +1674,9 @@ function extractHighlightKeywords(claim, data, reportText = '') {
   (claim.match(/[一-鿿]{2,8}(?:市|省|县|区|镇|机场|学校|医院|景区|乐园|口岸|港口)/g) || [])
     .forEach(e => addKeyword(e, 84));
 
-  // 3. 从 claim 提取：按标点分段（2-12字），作为补充候选
+  // 3. 从 claim 提取：按标点分段（2-16字），作为补充候选
   claim.split(/[，,。.！!？?；;：:、\s\n\r\t「」""''【】\[\]()（）\-—…·]+/)
-    .filter(seg => seg.length >= 2 && seg.length <= 12 && !stopWords.has(seg))
+    .filter(seg => seg.length >= 2 && seg.length <= 16 && !stopWords.has(seg))
     .forEach(seg => addKeyword(seg, 45));
 
   // 4. 数字+单位组合（如"7.7级""2026年"）
@@ -1672,7 +1723,8 @@ function extractHighlightKeywords(claim, data, reportText = '') {
   const preciseKeywords = [];
   sortedKeywords.forEach(kw => {
     const keepIfContained = /^(?:检方|被告|原告|法院|最高法院)?上诉$/.test(kw) ||
-      /^(?:未成年|未成年人)(?:青少年|儿童|少女|女童)?.*性影像$/.test(kw);
+      /^(?:未成年|未成年人)(?:青少年|儿童|少女|女童)?.*性影像$/.test(kw) ||
+      /(?:国家标准|行业标准|统一标准|生产标准|检测规范|监管规范|征求意见稿|新国标)/.test(kw);
     const isContainedByLonger = preciseKeywords.some(existing => (
       !keepIfContained &&
       existing.includes(kw) &&
@@ -1681,7 +1733,7 @@ function extractHighlightKeywords(claim, data, reportText = '') {
     if (!isContainedByLonger) preciseKeywords.push(kw);
   });
 
-  return preciseKeywords.slice(0, 80); // 面向完整报告阅读，保留更多高价值候选
+  return preciseKeywords.slice(0, 110); // 面向完整报告阅读，保留更多高价值候选
 }
 
 function normalizeAISummaryMarkdown(text) {
@@ -1719,7 +1771,8 @@ function normalizeAISummaryMarkdown(text) {
     .replace(new RegExp(`(?:^|\\n)\\s*\\d+[\\.．、]\\s*(${titlePattern})[：:]\\s*`, 'g'), '\n### $1\n')
     .replace(new RegExp(`(?:^|\\n)\\s*(?:[-•*]\\s+)?\\*\\*(${titlePattern})\\*\\*[：:]\\s*`, 'g'), '\n### $1\n')
     // 处理没有冒号的加粗标题（独占一行或紧跟内容）
-    .replace(new RegExp(`(?:^|\\n)\\s*\\*\\*(${titlePattern})\\*\\*\\s*(?=\\n|\\*\\*|[^*]|$)`, 'g'), '\n### $1\n');
+    .replace(new RegExp(`(?:^|\\n)\\s*\\*\\*(${titlePattern})\\*\\*\\s*(?=\\n|\\*\\*|[^*]|$)`, 'g'), '\n### $1\n')
+    .replace(new RegExp(`(?:^|\\n)\\s*(${titlePattern})\\s*(?=\\n)`, 'g'), '\n### $1\n');
 
   return normalized
     .split('\n')
@@ -1727,6 +1780,60 @@ function normalizeAISummaryMarkdown(text) {
     .join('\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+}
+
+function stripAISummaryOpeningSummary(text, brief = '') {
+  if (!text) return '';
+
+  let cleaned = String(text).replace(/\r\n?/g, '\n').trim();
+  const normalizedBrief = String(brief || '').trim();
+
+  if (normalizedBrief && cleaned.startsWith(normalizedBrief)) {
+    cleaned = cleaned.substring(normalizedBrief.length).trim().replace(/^[\n\r\s，,。.、]+/, '');
+  }
+
+  const sectionTitles = [
+    '核心事实提取',
+    '核心事实',
+    '深度洞察',
+    '洞察分析',
+    '与说法的精确对比',
+    '与说法的关系',
+    '准确点',
+    '偏差与限定',
+    '事实依据',
+    '结论判断',
+    '限定条件',
+    '风险提示',
+    '综合判断',
+  ];
+  const titlePattern = sectionTitles.join('|');
+  const firstSectionMatch = cleaned.match(new RegExp(
+    `(?:^|\\n)\\s*(?:#{2,4}\\s*)?(?:[-•*]\\s+)?(?:\\d+[\\.．、]\\s*)?(?:\\*\\*)?(?:${titlePattern})(?:\\*\\*)?[：:]?`,
+  ));
+
+  if (!firstSectionMatch || firstSectionMatch.index <= 0) return cleaned;
+
+  const opening = cleaned.slice(0, firstSectionMatch.index).trim();
+  const rest = cleaned.slice(firstSectionMatch.index).trim();
+  if (!opening || !rest) return cleaned;
+
+  const plainOpening = opening
+    .replace(/\*\*/g, '')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/^(?:支持\/印证|矛盾\/反对|中性\/背景)[：:\s]*/, '')
+    .trim();
+  const plainBrief = normalizedBrief.replace(/\s+/g, '');
+  const compactOpening = plainOpening.replace(/\s+/g, '');
+
+  const duplicatesBrief = plainBrief.length >= 18 && (
+    compactOpening.includes(plainBrief.slice(0, Math.min(28, plainBrief.length))) ||
+    plainBrief.includes(compactOpening.slice(0, Math.min(28, compactOpening.length)))
+  );
+  const looksLikeVerdictSummary = plainOpening.length >= 30 &&
+    /(说法|该说法|这一规定|该规定|结论|属实|准确|支持|印证|基本|核心事实|正在征求意见|排除在.*范围之外)/.test(plainOpening);
+
+  return duplicatesBrief || looksLikeVerdictSummary ? rest : cleaned;
 }
 
 // ==================== 提取推理过程摘要（从第3节证据关系分析） ====================
@@ -2285,24 +2392,7 @@ function showEvidenceReturnButton(target, resultRoot, returnState) {
 }
 
 function getMarkdownRelationClass(text) {
-  const normalized = String(text || '').replace(/\s+/g, '');
-  if (!normalized) return '';
-
-  // 明确的正向结论：说法相符/属实/未歪曲等结论性表态优先识别，
-  // 避免段落里出现"核心矛盾"这类名词性词汇就被误判为证据冲突。
-  const hasPositiveVerdict = /(基本相符|完全相符|大致相符|高度相符|相互吻合|相互印证|与[一-龥A-Za-z0-9]{0,12}(?:基本|完全|大致|高度)?一致|与[一-龥A-Za-z0-9]{0,12}(?:基本|完全|大致|高度)?吻合|与[一-龥A-Za-z0-9]{0,12}(?:基本|完全|大致|高度)?相符|未(?:见|存在)?(?:歪曲|夸大|失实|偏差)|属实|说法(?:基本)?成立|核心事实(?:基本)?(?:成立|属实)|准确概括)/.test(normalized);
-  if (hasPositiveVerdict) {
-    return ' md-relation md-relation-support';
-  }
-
-  const hasNegatedConflict = /(无|没有|未见|不存在|并无|并未|未发现|无任何)(?:[一-龥]{0,16})?(质疑|矛盾|冲突|对立|反对|反驳|不一致|分歧)/.test(normalized);
-  const hasSupportSignal = /(支持|印证|证实|佐证|一致|吻合|相符|共同指向|相互补充|补充说明|证据链)/.test(normalized);
-  if (!hasNegatedConflict && /(矛盾|冲突|对立|反对|反驳|不一致|否定|存疑|分歧)/.test(normalized)) {
-    return ' md-relation md-relation-conflict';
-  }
-  if (hasSupportSignal) {
-    return ' md-relation md-relation-support';
-  }
+  void text;
   return '';
 }
 

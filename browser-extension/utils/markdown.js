@@ -125,16 +125,7 @@ function decorateMarkdownFields(html) {
 }
 
 function getMarkdownRelationClass(text) {
-  const normalized = String(text || '').replace(/\s+/g, '');
-  if (!normalized) return '';
-  const hasNegatedConflict = /(无|没有|未见|不存在|并无|并未|未发现|无任何)(?:[一-龥]{0,6})?(矛盾|冲突|对立|反对|反驳|不一致|分歧)/.test(normalized);
-  const hasSupportSignal = /(支持|印证|证实|佐证|一致|吻合|共同指向|相互补充|补充说明|证据链)/.test(normalized);
-  if (!hasNegatedConflict && /(矛盾|冲突|对立|反对|反驳|不一致|否定|存疑|分歧)/.test(normalized)) {
-    return ' md-relation md-relation-conflict';
-  }
-  if (hasSupportSignal) {
-    return ' md-relation md-relation-support';
-  }
+  void text;
   return '';
 }
 

@@ -1168,39 +1168,76 @@
   line-height: 1.5;
 }
 
-.all-sources-row {
-  margin-top: 8px;
-  padding-top: 8px;
+.all-sources-panel {
+  margin-top: 18px;
+  padding: 14px 16px 16px;
   border-top: 1px dashed #c7d2e8;
-  font-size: 14px;
-  line-height: 1.6;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 8px;
-  align-items: baseline;
-}
-
-.all-sources-label {
-  color: #6b7f99;
-  font-weight: 500;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-
-.all-sources-list {
+  background: #f7f9fc;
   color: #4b5563;
 }
 
+.all-sources-heading {
+  margin-bottom: 8px;
+  color: #5d718b;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.all-sources-list {
+  display: grid;
+  gap: 7px;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
 .all-source-item {
-  display: inline;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: baseline;
+  padding: 7px 9px;
+  border: 1px solid #e1e7ef;
+  border-radius: 7px;
+  background: #ffffff;
   color: #34506b;
   font-weight: 500;
+  text-decoration: none;
 }
 
 .all-source-item:hover {
+  border-color: #b9c9dc;
+  background: #fbfdff;
   color: #1967d2;
-  text-decoration: underline;
-  cursor: default;
+}
+
+.all-source-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.all-source-domain {
+  color: #6b7f99;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.all-sources-more {
+  margin-top: 8px;
+}
+
+.all-sources-more summary {
+  cursor: pointer;
+  color: #2458a6;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.6;
+}
+
+.all-sources-list-more {
+  margin-top: 8px;
 }
 
 .stats-row {
@@ -1381,57 +1418,6 @@
   line-height: 1.78;
 }
 
-.reasoning-full .markdown-content .md-relation,
-#ai-check-window .hero-summary-full .markdown-content .md-relation {
-  position: relative;
-  margin: 14px 0 16px;
-  padding: 11px 13px 11px 15px;
-  border-radius: 8px;
-  border: 1px solid #e1e7ef;
-  background: #ffffff;
-  list-style-position: inside;
-}
-
-.reasoning-full .markdown-content .md-relation-support,
-#ai-check-window .hero-summary-full .markdown-content .md-relation-support {
-  border-left: 4px solid #137333;
-  background: #f6fff8;
-}
-
-.reasoning-full .markdown-content .md-relation-conflict,
-#ai-check-window .hero-summary-full .markdown-content .md-relation-conflict {
-  border-left: 4px solid #c5221f;
-  background: #fff7f6;
-}
-
-.reasoning-full .markdown-content .md-relation-support::before,
-#ai-check-window .hero-summary-full .markdown-content .md-relation-support::before,
-.reasoning-full .markdown-content .md-relation-conflict::before,
-#ai-check-window .hero-summary-full .markdown-content .md-relation-conflict::before {
-  display: inline-block;
-  margin-right: 7px;
-  padding: 1px 7px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 700;
-  line-height: 1.55;
-  vertical-align: 1px;
-}
-
-.reasoning-full .markdown-content .md-relation-support::before,
-#ai-check-window .hero-summary-full .markdown-content .md-relation-support::before {
-  content: "支持/印证";
-  color: #137333;
-  background: #e6f4ea;
-}
-
-.reasoning-full .markdown-content .md-relation-conflict::before,
-#ai-check-window .hero-summary-full .markdown-content .md-relation-conflict::before {
-  content: "矛盾/反对";
-  color: #b3261e;
-  background: #fce8e6;
-}
-
 .reasoning-full .markdown-content .md-blockquote,
 #ai-check-window .hero-summary-full .markdown-content .md-blockquote {
   margin: 12px 0 14px;
@@ -1447,81 +1433,89 @@
   margin-top: 0;
 }
 
-/* 详细报告：保留关系提示，但避免长段落被做成厚重卡片。 */
-.reasoning-full .markdown-content .md-relation,
-#ai-check-window .hero-summary-full .markdown-content .md-relation {
-  margin: 8px 0 14px;
-  padding: 0 0 0 14px;
-  border: 0;
-  border-left: 3px solid #c5cfda;
-  border-radius: 0;
-  background: transparent;
-  list-style-position: outside;
-}
-
-.reasoning-full .markdown-content .md-relation-support,
-#ai-check-window .hero-summary-full .markdown-content .md-relation-support {
-  border-left-color: #2e7d47;
-  background: transparent;
-}
-
-.reasoning-full .markdown-content .md-relation-conflict,
-#ai-check-window .hero-summary-full .markdown-content .md-relation-conflict {
-  border-left-color: #b3261e;
-  background: transparent;
-}
-
-.reasoning-full .markdown-content .md-relation-support::before,
-#ai-check-window .hero-summary-full .markdown-content .md-relation-support::before,
-.reasoning-full .markdown-content .md-relation-conflict::before,
-#ai-check-window .hero-summary-full .markdown-content .md-relation-conflict::before {
-  margin-right: 8px;
-  padding: 1px 7px;
-  border-radius: 6px;
-  font-size: 12px;
-  line-height: 1.45;
-  vertical-align: 2px;
-}
-
-/* AI归纳总结详细报告：使用连续审阅文档版式，与证据解读保持统一轻量标注。 */
-#ai-check-window .hero-summary-full > .markdown-content {
+/* 详细报告统一版式：AI归纳总结与证据解读使用同一套标题蓝框和连续正文。 */
+#ai-check-window .hero-summary-full > .markdown-content,
+#ai-check-window .reasoning-full > .markdown-content,
+#ai-check-window .hero-summary-full.markdown-content,
+#ai-check-window .reasoning-full.markdown-content {
   display: block;
 }
 
+#ai-check-window .reasoning-full.markdown-content .md-h2,
+#ai-check-window .reasoning-full.markdown-content .md-h3,
+#ai-check-window .reasoning-full.markdown-content .md-h4,
+#ai-check-window .hero-summary-full.markdown-content .md-h2,
+#ai-check-window .hero-summary-full.markdown-content .md-h3,
+#ai-check-window .hero-summary-full.markdown-content .md-h4,
+#ai-check-window .reasoning-full .markdown-content .md-h2,
+#ai-check-window .reasoning-full .markdown-content .md-h3,
+#ai-check-window .reasoning-full .markdown-content .md-h4,
 #ai-check-window .hero-summary-full .markdown-content .md-h2,
 #ai-check-window .hero-summary-full .markdown-content .md-h3,
 #ai-check-window .hero-summary-full .markdown-content .md-h4 {
-  display: block;
-  min-height: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
   letter-spacing: 0;
 }
 
-#ai-check-window .hero-summary-full .markdown-content .md-h2,
-#ai-check-window .hero-summary-full .markdown-content .md-h3 {
-  margin: 22px 0 10px;
-  padding: 0 0 8px;
-  border-bottom: 1px solid #dfe6ee;
-  color: #1f2937;
+#ai-check-window .reasoning-full.markdown-content .md-h2,
+#ai-check-window .hero-summary-full.markdown-content .md-h2,
+#ai-check-window .reasoning-full .markdown-content .md-h2,
+#ai-check-window .hero-summary-full .markdown-content .md-h2 {
+  display: flex;
+  align-items: center;
+  min-height: 38px;
+  margin: 18px 0 12px;
+  padding: 9px 12px;
+  background: #f4f7fb !important;
+  border: 1px solid #dce4ef !important;
+  border-left: 4px solid #2458a6 !important;
+  border-radius: 8px !important;
   font-size: 16px;
+  line-height: 1.35;
+  letter-spacing: 0;
+}
+
+#ai-check-window .reasoning-full.markdown-content .md-h3,
+#ai-check-window .hero-summary-full.markdown-content .md-h3,
+#ai-check-window .reasoning-full .markdown-content .md-h3,
+#ai-check-window .hero-summary-full .markdown-content .md-h3 {
+  display: block;
+  margin: 18px 0 10px;
+  padding: 7px 10px;
+  background: #f8fafc !important;
+  border: 0 !important;
+  border-left: 4px solid #6b7f99 !important;
+  border-radius: 6px !important;
+  color: #202124;
+  font-size: 15px;
   line-height: 1.45;
 }
 
+#ai-check-window .reasoning-full.markdown-content .md-h2:first-child,
+#ai-check-window .reasoning-full.markdown-content .md-h3:first-child,
+#ai-check-window .hero-summary-full.markdown-content .md-h2:first-child,
+#ai-check-window .hero-summary-full.markdown-content .md-h3:first-child,
+#ai-check-window .reasoning-full .markdown-content .md-h2:first-child,
+#ai-check-window .reasoning-full .markdown-content .md-h3:first-child,
 #ai-check-window .hero-summary-full .markdown-content .md-h2:first-child,
 #ai-check-window .hero-summary-full .markdown-content .md-h3:first-child {
   margin-top: 0;
 }
 
+#ai-check-window .reasoning-full.markdown-content .md-h4,
+#ai-check-window .hero-summary-full.markdown-content .md-h4,
+#ai-check-window .reasoning-full .markdown-content .md-h4,
 #ai-check-window .hero-summary-full .markdown-content .md-h4 {
   margin: 16px 0 8px;
-  padding: 0;
-  color: #2f4f3a;
+  padding-left: 10px;
+  border-left: 3px solid #c5cfda !important;
+  color: #374151;
   font-size: 14px;
   line-height: 1.45;
 }
 
+#ai-check-window .reasoning-full.markdown-content .md-p,
+#ai-check-window .hero-summary-full.markdown-content .md-p,
+#ai-check-window .reasoning-full .markdown-content .md-p,
 #ai-check-window .hero-summary-full .markdown-content .md-p {
   margin: 0 0 13px;
   padding: 0;
@@ -1532,19 +1526,29 @@
   line-height: 1.82;
 }
 
+#ai-check-window .reasoning-full.markdown-content .md-ul,
+#ai-check-window .reasoning-full.markdown-content .md-ol,
+#ai-check-window .hero-summary-full.markdown-content .md-ul,
+#ai-check-window .hero-summary-full.markdown-content .md-ol,
+#ai-check-window .reasoning-full .markdown-content .md-ul,
+#ai-check-window .reasoning-full .markdown-content .md-ol,
 #ai-check-window .hero-summary-full .markdown-content .md-ul,
 #ai-check-window .hero-summary-full .markdown-content .md-ol {
-  margin: 8px 0 16px;
-  padding: 0 0 0 24px;
+  margin: 0 0 13px;
+  padding: 0;
   border: 0;
   border-radius: 0;
   background: transparent;
+  list-style: none;
 }
 
+#ai-check-window .reasoning-full.markdown-content .md-li,
+#ai-check-window .hero-summary-full.markdown-content .md-li,
+#ai-check-window .reasoning-full .markdown-content .md-li,
 #ai-check-window .hero-summary-full .markdown-content .md-li {
-  margin: 7px 0;
-  padding-left: 4px;
-  line-height: 1.78;
+  margin: 0 0 13px;
+  padding: 0;
+  line-height: 1.82;
 }
 
 /* ========== Stance Tags (inline badges in markdown) ========== */

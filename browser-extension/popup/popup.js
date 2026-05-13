@@ -234,10 +234,7 @@ function displayPopupResult(data) {
        (data.evidence_chain.opposing_evidence?.length || 0) +
        (data.evidence_chain.neutral_evidence?.length || 0));
     const summaryMeta = evidenceCount > 0 ? `基于 ${evidenceCount} 条核心证据` : '综合证据分析';
-    // 去除开头摘要部分，避免重复
-    if (full && brief && full.startsWith(brief)) {
-      full = full.substring(brief.length).trim().replace(/^[\n\r\s，,。.、]+/, '');
-    }
+    full = stripPopupAISummaryOpeningSummary(full, brief);
     summaryDetailMarkdown = full;
     html += `<div class="analysis-panel hero-summary">
       <div class="analysis-panel-header">
@@ -283,7 +280,7 @@ function displayPopupResult(data) {
   if (actualTotal > 0) {
     // 证据检索逻辑说明
     const totalSearchResults = ec?.total_search_results || 0;
-    html += buildPopupEvidenceOverviewHtml(totalSearchResults, actualTotal, ec?.reasoning_summary, ec?.all_search_results);
+    html += buildPopupEvidenceOverviewHtml(totalSearchResults, actualTotal, ec?.reasoning_summary);
 
     html += `
       <div class="stats-row">
@@ -339,6 +336,8 @@ function displayPopupResult(data) {
   }
   html += `</div>`;
 
+  html += buildPopupAllSourcesHtml(ec?.all_search_results);
+
   $('resultArea').innerHTML = html;
   $('resultArea').classList.remove('hidden');
 
@@ -386,7 +385,7 @@ function displayPopupResult(data) {
   });
 }
 
-function buildPopupEvidenceOverviewHtml(totalSearchResults, totalEvidence, reasoningSummary, allSearchResults) {
+function buildPopupEvidenceOverviewHtml(totalSearchResults, totalEvidence, reasoningSummary) {
   const lines = [];
   if (totalSearchResults > totalEvidence) {
     lines.push(`检索到 ${totalSearchResults} 个结果，其中 ${totalEvidence} 个与待核查说法匹配度较高，已作为核心证据进行分析；其余结果可能为重复转载、背景信息或相关性较弱内容。`);
@@ -399,38 +398,113 @@ function buildPopupEvidenceOverviewHtml(totalSearchResults, totalEvidence, reaso
     lines.push(qualitySummary);
   }
 
-  let allSourcesHtml = '';
+  return lines.length
+    ? `<div class="evidence-retrieval-info">📊 ${lines.map(line => renderInlineMarkdown(line)).join('<br>')}</div>`
+    : '';
+}
+
+function buildPopupAllSourcesHtml(allSearchResults) {
   if (Array.isArray(allSearchResults) && allSearchResults.length > 0) {
-    const uniqueDomains = [];
+    const sources = [];
     const seen = new Set();
     allSearchResults.forEach(r => {
       const domain = r.domain || '';
-      if (domain && !seen.has(domain)) {
-        seen.add(domain);
-        uniqueDomains.push({ domain, title: r.title || '' });
+      const title = String(r.title || '').trim();
+      const url = String(r.url || '').trim();
+      const key = url || `${domain}:${title}`;
+      if ((domain || title) && !seen.has(key)) {
+        seen.add(key);
+        sources.push({ domain, title, url });
       }
     });
-    if (uniqueDomains.length > 0) {
-      const sourceItems = uniqueDomains.map((item) =>
-        `<span class="all-source-item" title="${escapeHtml(item.title)}">${escapeHtml(item.domain)}</span>`
-      ).join(' · ');
-      allSourcesHtml = `
-        <div class="all-sources-row">
-          <span class="all-sources-label">全部来源</span>
-          <span class="all-sources-list">${sourceItems}</span>
-        </div>`;
+    if (sources.length > 0) {
+      const visibleLimit = 5;
+      const renderSourceItem = (item) => {
+        const name = item.title || item.domain || '未命名来源';
+        const label = escapeHtml(name.length > 30 ? `${name.slice(0, 29)}...` : name);
+        const meta = item.domain ? `<span class="all-source-domain">${escapeHtml(item.domain)}</span>` : '';
+        const content = `<span class="all-source-name">${label}</span>${meta}`;
+        return item.url
+          ? `<a class="all-source-item" href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(name)}">${content}</a>`
+          : `<span class="all-source-item" title="${escapeHtml(name)}">${content}</span>`;
+      };
+      const visibleItems = sources.slice(0, visibleLimit).map(renderSourceItem).join('');
+      const hiddenItems = sources.slice(visibleLimit).map(renderSourceItem).join('');
+      const hiddenHtml = hiddenItems
+        ? `<details class="all-sources-more">
+            <summary>展开其余 ${sources.length - visibleLimit} 个来源</summary>
+            <div class="all-sources-list all-sources-list-more">${hiddenItems}</div>
+          </details>`
+        : '';
+      return `
+        <section class="all-sources-panel" aria-label="检索来源">
+          <div class="all-sources-heading">检索来源</div>
+          <div class="all-sources-list">${visibleItems}</div>
+          ${hiddenHtml}
+        </section>`;
     }
   }
-
-  return lines.length
-    ? `<div class="evidence-retrieval-info">📊 ${lines.map(line => renderInlineMarkdown(line)).join('<br>')}${allSourcesHtml}</div>`
-    : '';
+  return '';
 }
 
 function stripPopupEvidenceCountLead(text) {
   return String(text || '')
     .replace(/^共检索到\d+条证据，覆盖\d+个不同域名来源。\s*/u, '')
     .trim();
+}
+
+function stripPopupAISummaryOpeningSummary(text, brief = '') {
+  if (!text) return '';
+
+  let cleaned = String(text).replace(/\r\n?/g, '\n').trim();
+  const normalizedBrief = String(brief || '').trim();
+
+  if (normalizedBrief && cleaned.startsWith(normalizedBrief)) {
+    cleaned = cleaned.substring(normalizedBrief.length).trim().replace(/^[\n\r\s，,。.、]+/, '');
+  }
+
+  const sectionTitles = [
+    '核心事实提取',
+    '核心事实',
+    '深度洞察',
+    '洞察分析',
+    '与说法的精确对比',
+    '与说法的关系',
+    '准确点',
+    '偏差与限定',
+    '事实依据',
+    '结论判断',
+    '限定条件',
+    '风险提示',
+    '综合判断',
+  ];
+  const titlePattern = sectionTitles.join('|');
+  const firstSectionMatch = cleaned.match(new RegExp(
+    `(?:^|\\n)\\s*(?:#{2,4}\\s*)?(?:[-•*]\\s+)?(?:\\d+[\\.．、]\\s*)?(?:\\*\\*)?(?:${titlePattern})(?:\\*\\*)?[：:]?`,
+  ));
+
+  if (!firstSectionMatch || firstSectionMatch.index <= 0) return cleaned;
+
+  const opening = cleaned.slice(0, firstSectionMatch.index).trim();
+  const rest = cleaned.slice(firstSectionMatch.index).trim();
+  if (!opening || !rest) return cleaned;
+
+  const plainOpening = opening
+    .replace(/\*\*/g, '')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/^(?:支持\/印证|矛盾\/反对|中性\/背景)[：:\s]*/, '')
+    .trim();
+  const plainBrief = normalizedBrief.replace(/\s+/g, '');
+  const compactOpening = plainOpening.replace(/\s+/g, '');
+
+  const duplicatesBrief = plainBrief.length >= 18 && (
+    compactOpening.includes(plainBrief.slice(0, Math.min(28, plainBrief.length))) ||
+    plainBrief.includes(compactOpening.slice(0, Math.min(28, compactOpening.length)))
+  );
+  const looksLikeVerdictSummary = plainOpening.length >= 30 &&
+    /(说法|该说法|这一规定|该规定|结论|属实|准确|支持|印证|基本|核心事实|正在征求意见|排除在.*范围之外)/.test(plainOpening);
+
+  return duplicatesBrief || looksLikeVerdictSummary ? rest : cleaned;
 }
 
 function renderLazyMarkdownDetail(fullEl, markdown) {

@@ -91,8 +91,8 @@ test('fetch network errors include the configured API base', () => {
 test('yellow highlights are allowed inside full analysis reports', () => {
   assert.doesNotMatch(contentScript, /closest\('\\.reasoning-full'\)/);
   assert.doesNotMatch(contentScript, /closest\('\\.hero-summary-full'\)/);
-  assert.match(contentScript, /MAX_HIGHLIGHTS_IN_FULL_REPORT\s*=\s*160/);
-  assert.match(contentScript, /MAX_HIGHLIGHTS_PER_FULL_REPORT_BLOCK\s*=\s*10/);
+  assert.match(contentScript, /MAX_HIGHLIGHTS_IN_FULL_REPORT\s*=\s*220/);
+  assert.match(contentScript, /MAX_HIGHLIGHTS_PER_FULL_REPORT_BLOCK\s*=\s*14/);
 });
 
 test('collapsed checks show a visible completion notice in history', () => {
@@ -143,21 +143,37 @@ test('AI summary detail uses unified markdown layout', () => {
   assert.match(contentStyles, /hero-summary-full > \.markdown-content/);
 });
 
-test('AI summary detail uses the same lightweight relation style as reasoning detail', () => {
-  assert.match(contentStyles, /AI归纳总结详细报告：使用连续审阅文档版式，与证据解读保持统一轻量标注/);
-  assert.match(contentStyles, /hero-summary-full > \.markdown-content\s*\{\s*display:\s*block/);
-  assert.match(contentStyles, /hero-summary-full \.markdown-content \.md-relation\s*\{[\s\S]*border-left:\s*3px solid #c5cfda/);
-  assert.match(contentStyles, /hero-summary-full \.markdown-content \.md-relation-support\s*\{[\s\S]*background:\s*transparent/);
-  assert.doesNotMatch(contentStyles, /hero-summary-full \.markdown-content \.md-relation-support::before[\s\S]*content:\s*none/);
-  assert.match(contentStyles, /hero-summary-full \.markdown-content \.md-p[\s\S]*background:\s*transparent/);
+test('AI summary detail uses the same heading style as reasoning detail', () => {
+  assert.match(contentStyles, /详细报告统一版式：AI归纳总结与证据解读使用同一套标题蓝框和连续正文/);
+  assert.match(contentStyles, /hero-summary-full\.markdown-content,\s*\n#ai-check-window \.reasoning-full\.markdown-content\s*\{[\s\S]*display:\s*block/);
+  assert.match(contentStyles, /hero-summary-full\.markdown-content \.md-h2/);
+  assert.match(contentStyles, /reasoning-full\.markdown-content \.md-h2/);
+  assert.match(contentStyles, /border-left:\s*4px solid #2458a6 !important/);
+  assert.match(contentStyles, /hero-summary-full\.markdown-content \.md-h3/);
+  assert.match(contentStyles, /reasoning-full\.markdown-content \.md-h3/);
+  assert.match(contentStyles, /border-left:\s*4px solid #6b7f99 !important/);
+  assert.match(contentStyles, /reasoning-full\.markdown-content \.md-p,[\s\S]*hero-summary-full \.markdown-content \.md-p\s*\{[\s\S]*background:\s*transparent/);
 });
 
-test('reasoning detail uses lightweight relation markers instead of large cards', () => {
-  assert.match(contentStyles, /详细报告：保留关系提示/);
-  assert.match(contentStyles, /reasoning-full \.markdown-content \.md-relation,\s*\n#ai-check-window \.hero-summary-full \.markdown-content \.md-relation\s*\{[\s\S]*background:\s*transparent/);
-  assert.match(contentStyles, /reasoning-full \.markdown-content \.md-relation,\s*\n#ai-check-window \.hero-summary-full \.markdown-content \.md-relation\s*\{[\s\S]*border-left:\s*3px solid #c5cfda/);
-  assert.match(contentStyles, /reasoning-full \.markdown-content \.md-relation-support,\s*\n#ai-check-window \.hero-summary-full \.markdown-content \.md-relation-support\s*\{[\s\S]*background:\s*transparent/);
-  assert.match(contentStyles, /reasoning-full \.markdown-content \.md-relation-conflict,\s*\n#ai-check-window \.hero-summary-full \.markdown-content \.md-relation-conflict\s*\{[\s\S]*background:\s*transparent/);
+test('detail report list items align with normal paragraphs', () => {
+  const detailListBlock = contentStyles.match(/#ai-check-window \.reasoning-full\.markdown-content \.md-ul,[\s\S]*?#ai-check-window \.hero-summary-full \.markdown-content \.md-ol \{[\s\S]*?\n\}/)?.[0] || '';
+  const detailItemBlock = contentStyles.match(/#ai-check-window \.reasoning-full\.markdown-content \.md-li,[\s\S]*?#ai-check-window \.hero-summary-full \.markdown-content \.md-li \{[\s\S]*?\n\}/)?.[0] || '';
+
+  assert.match(detailListBlock, /padding:\s*0/);
+  assert.match(detailListBlock, /list-style:\s*none/);
+  assert.match(detailItemBlock, /padding:\s*0/);
+  assert.match(detailItemBlock, /margin:\s*0 0 13px/);
+  assert.match(popupStyles, /\.reasoning-full\.markdown-content \.md-ul,[\s\S]*list-style:\s*none/);
+  assert.match(popupStyles, /\.reasoning-full\.markdown-content \.md-li,[\s\S]*padding:\s*0/);
+});
+
+test('reasoning detail does not render automatic relation badges', () => {
+  assert.doesNotMatch(contentStyles, /支持\/印证/);
+  assert.doesNotMatch(contentStyles, /矛盾\/反对/);
+  assert.doesNotMatch(contentStyles, /\.md-relation(?:-support|-conflict)?\s*\{/);
+  assert.doesNotMatch(popupStyles, /支持\/印证/);
+  assert.doesNotMatch(popupStyles, /矛盾\/反对/);
+  assert.match(contentScript, /function getMarkdownRelationClass\(text\) \{[\s\S]*?return '';\n\}/);
 });
 
 test('AI summary normalization merges 深度洞察 label and body into one heading', () => {
@@ -203,6 +219,54 @@ test('AI summary normalization merges 深度洞察 label and body into one headi
   );
   assert.match(inline, /### 深度洞察\n信息背后是市场期待与监管进度的差异。/);
   assert.match(inline, /### 与说法的精确对比\n说法基本准确。/);
+});
+
+test('AI summary detail removes duplicated opening verdict paragraph', () => {
+  const sandbox = {
+    EXT_CONFIG: { API_BASE: 'http://127.0.0.1:8000' },
+    console: { log() {}, warn() {}, error() {} },
+    document: {
+      readyState: 'loading',
+      addEventListener() {},
+      getElementById() { return null; },
+      createElement() { return { style: {}, addEventListener() {}, appendChild() {}, remove() {} }; },
+      createTreeWalker() { return { nextNode() { return null; } }; },
+      body: { appendChild() {} },
+      title: '',
+      querySelector() { return null; },
+    },
+    chrome: { runtime: { onMessage: { addListener() {} } }, storage: { local: {} } },
+    NodeFilter: { SHOW_TEXT: 4, FILTER_REJECT: 2, FILTER_ACCEPT: 1 },
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+    requestAnimationFrame: (fn) => fn(),
+    URL,
+    window: {},
+    globalThis: {},
+  };
+  sandbox.window = sandbox;
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(contentScript, sandbox);
+
+  const full = [
+    '说法基本属实。正在征求意见的预制菜新国标确拟将“中央厨房制作的菜肴”排除在预制菜定义范围之外。这一规定与官方通知一脉相承。',
+    '',
+    '核心事实提取',
+    '2026年2月6日，国家卫健委发布征求意见稿。',
+    '',
+    '深度洞察',
+    '该定义体现了监管边界。',
+  ].join('\n');
+
+  const stripped = sandbox.stripAISummaryOpeningSummary(full, '说法基本属实。');
+  const normalized = sandbox.normalizeAISummaryMarkdown(stripped);
+
+  assert.doesNotMatch(stripped, /^说法基本属实/);
+  assert.match(normalized, /^### 核心事实提取/);
+  assert.match(popupScript, /function stripPopupAISummaryOpeningSummary/);
 });
 
 test('full summary and reasoning details are rendered only after expand click', () => {
@@ -280,6 +344,30 @@ test('evidence overview merges retrieval and quality summaries into one card', (
   assert.doesNotMatch(contentScript, /class="evidence-quality-info"/);
   assert.match(popupScript, /function buildPopupEvidenceOverviewHtml/);
   assert.match(popupScript, /function stripPopupEvidenceCountLead/);
+});
+
+test('all searched sources render as a footer section instead of evidence overview text', () => {
+  const contentAllSourcesBlock = contentScript.match(/function buildAllSourcesHtml\(allSearchResults\) \{[\s\S]*?function stripEvidenceCountLead/)?.[0] || '';
+  const popupAllSourcesBlock = popupScript.match(/function buildPopupAllSourcesHtml\(allSearchResults\) \{[\s\S]*?function stripPopupEvidenceCountLead/)?.[0] || '';
+
+  assert.match(contentScript, /function buildAllSourcesHtml\(allSearchResults\)/);
+  assert.match(contentScript, /html \+= buildAllSourcesHtml\(ec\?\.all_search_results\)/);
+  assert.match(contentScript, /class="all-sources-panel"/);
+  assert.match(contentScript, /class="all-source-name"/);
+  assert.match(contentScript, /class="all-source-domain"/);
+  assert.match(contentScript, /<details class="all-sources-more">/);
+  assert.match(contentScript, /展开其余 \$\{sources\.length - visibleLimit\} 个来源/);
+  assert.doesNotMatch(contentAllSourcesBlock, /join\(' · '\)/);
+  assert.doesNotMatch(contentScript, /buildEvidenceOverviewHtml\(totalSearchResults, totalEvidence, ec\?\.reasoning_summary, ec\?\.all_search_results\)/);
+  assert.match(popupScript, /function buildPopupAllSourcesHtml\(allSearchResults\)/);
+  assert.match(popupScript, /html \+= buildPopupAllSourcesHtml\(ec\?\.all_search_results\)/);
+  assert.match(popupScript, /class="all-source-name"/);
+  assert.match(popupScript, /class="all-source-domain"/);
+  assert.match(popupScript, /<details class="all-sources-more">/);
+  assert.doesNotMatch(popupAllSourcesBlock, /join\(' · '\)/);
+  assert.doesNotMatch(popupScript, /buildPopupEvidenceOverviewHtml\(totalSearchResults, actualTotal, ec\?\.reasoning_summary, ec\?\.all_search_results\)/);
+  assert.match(contentStyles, /\.all-source-name \{[\s\S]*text-overflow:\s*ellipsis/);
+  assert.match(contentStyles, /\.all-sources-more summary \{[\s\S]*cursor:\s*pointer/);
 });
 
 test('history allows repeated claims as separate records', () => {
@@ -571,6 +659,91 @@ test('AI summary highlights keep spaced Chinese fact phrases intact', () => {
   assert.ok(keywords.indexOf('未成年性影像') > -1);
   assert.deepEqual(JSON.parse(JSON.stringify(matches)), [{ start: 6, end: 15 }]);
   assert.equal(summary.slice(matches[0].start, matches[0].end), '大量未成年 性影像');
+});
+
+test('extractHighlightKeywords filters report structure phrases and evidence counts', () => {
+  const sandbox = {
+    EXT_CONFIG: { API_BASE: 'http://127.0.0.1:8000' },
+    console: { log() {}, warn() {}, error() {} },
+    document: {
+      readyState: 'loading',
+      addEventListener() {},
+      getElementById() { return null; },
+      createElement() { return { style: {}, addEventListener() {}, appendChild() {}, remove() {} }; },
+      createTreeWalker() { return { nextNode() { return null; } }; },
+      body: { appendChild() {} },
+      title: '',
+      querySelector() { return null; },
+    },
+    chrome: { runtime: { onMessage: { addListener() {} } }, storage: { local: {} } },
+    NodeFilter: { SHOW_TEXT: 4, FILTER_REJECT: 2, FILTER_ACCEPT: 1 },
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+    requestAnimationFrame: (fn) => fn(),
+    window: {},
+    globalThis: {},
+  };
+  sandbox.window = sandbox;
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(contentScript, sandbox);
+
+  const keywords = sandbox.extractHighlightKeywords(
+    '预制菜新国标规定中央厨房做的菜不算预制菜',
+    { evidence_chain: { supporting_evidence: [], opposing_evidence: [], neutral_evidence: [] } },
+    '所有11条核心证据均支持该说法，所有信息均指向同一结论。证据11、12、13是同一篇专家解读文章。核心信息来自2026年2月6日国家卫健委发布的《食品安全国家标准 预制菜》征求意见稿。',
+  );
+
+  assert.equal(keywords.indexOf('11条'), -1);
+  assert.equal(keywords.indexOf('所有信息均指向同一结论'), -1);
+  assert.equal(keywords.indexOf('专家解读文章'), -1);
+  assert.ok(keywords.indexOf('2026年2月6日') > -1);
+  assert.ok(keywords.indexOf('国家卫健委') > -1);
+  assert.ok(keywords.indexOf('《食品安全国家标准 预制菜》') > -1);
+  assert.ok(keywords.indexOf('食品安全国家标准 预制菜') > -1);
+});
+
+test('extractHighlightKeywords keeps precise policy and quoted fact phrases', () => {
+  const sandbox = {
+    EXT_CONFIG: { API_BASE: 'http://127.0.0.1:8000' },
+    console: { log() {}, warn() {}, error() {} },
+    document: {
+      readyState: 'loading',
+      addEventListener() {},
+      getElementById() { return null; },
+      createElement() { return { style: {}, addEventListener() {}, appendChild() {}, remove() {} }; },
+      createTreeWalker() { return { nextNode() { return null; } }; },
+      body: { appendChild() {} },
+      title: '',
+      querySelector() { return null; },
+    },
+    chrome: { runtime: { onMessage: { addListener() {} } }, storage: { local: {} } },
+    NodeFilter: { SHOW_TEXT: 4, FILTER_REJECT: 2, FILTER_ACCEPT: 1 },
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+    requestAnimationFrame: (fn) => fn(),
+    window: {},
+    globalThis: {},
+  };
+  sandbox.window = sandbox;
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(contentScript, sandbox);
+
+  const keywords = sandbox.extractHighlightKeywords(
+    '预制菜新国标规定中央厨房做的菜不算预制菜',
+    { evidence_chain: { supporting_evidence: [], opposing_evidence: [], neutral_evidence: [] } },
+    '说法基本属实。正在征求意见的预制菜新国标确拟将“中央厨房制作的菜肴”排除在预制菜定义范围之外。共享的是个人账户“资金”而非“医保卡”本身，钱可以共济，卡不能共用。',
+  );
+
+  assert.ok(keywords.indexOf('中央厨房制作的菜肴') > -1);
+  assert.ok(keywords.indexOf('排除在预制菜定义范围之外') > -1);
+  assert.ok(keywords.indexOf('钱可以共济') > -1);
+  assert.ok(keywords.indexOf('卡不能共用') > -1);
 });
 
 test('reasoning brief prepends actual core evidence count and stance context', () => {
@@ -927,7 +1100,7 @@ test('evidence anchor jumps expose a return control', () => {
   assert.match(contentStyles, /\.evidence-anchor-return-focus/);
 });
 
-test('relation styling treats negated conflicts with consistency wording as support', () => {
+test('relation wording stays plain even when it contains negated conflicts', () => {
   const sandbox = {
     EXT_CONFIG: { API_BASE: 'http://127.0.0.1:8000' },
     console: { log() {}, warn() {}, error() {} },
@@ -959,11 +1132,11 @@ test('relation styling treats negated conflicts with consistency wording as supp
 
   const html = sandbox.parseMarkdown('所有30条核心证据均对该说法构成支持，没有任何证据提出质疑或反驳。展示的9条核心证据中，多数形成了高度一致的证据链，在核心事实上完全吻合，无任何矛盾。');
 
-  assert.match(html, /md-relation-support/);
+  assert.doesNotMatch(html, /md-relation-support/);
   assert.doesNotMatch(html, /md-relation-conflict/);
 });
 
-test('relation styling treats no major conflict wording as support', () => {
+test('relation wording stays plain when it says no major conflict', () => {
   const sandbox = {
     EXT_CONFIG: { API_BASE: 'http://127.0.0.1:8000' },
     console: { log() {}, warn() {}, error() {} },
@@ -995,11 +1168,11 @@ test('relation styling treats no major conflict wording as support', () => {
 
   const html = sandbox.parseMarkdown('多数内容高度一致，信息细节无重大矛盾，共同形成了一个密实且可靠的证据链。');
 
-  assert.match(html, /md-relation-support/);
+  assert.doesNotMatch(html, /md-relation-support/);
   assert.doesNotMatch(html, /md-relation-conflict/);
 });
 
-test('relation styling treats positive verdicts mentioning 核心矛盾 as support', () => {
+test('positive verdicts mentioning 核心矛盾 stay plain text', () => {
   const sandbox = {
     EXT_CONFIG: { API_BASE: 'http://127.0.0.1:8000' },
     console: { log() {}, warn() {}, error() {} },
@@ -1031,7 +1204,7 @@ test('relation styling treats positive verdicts mentioning 核心矛盾 as suppo
 
   const html = sandbox.parseMarkdown('待核查说法准确概括了事件的核心矛盾。说法中的"天天上课"与报道中的"天天坚持去上课"基本相符；说法未歪曲或夸大事件，是一个简洁的事件描述。');
 
-  assert.match(html, /md-relation-support/);
+  assert.doesNotMatch(html, /md-relation-support/);
   assert.doesNotMatch(html, /md-relation-conflict/);
 });
 
