@@ -253,6 +253,23 @@ def build_llm_prompt(claim: str, evidence_list: List[SearchResult]) -> str:
     return prompt
 
 
+def build_assistant_llm_prompt(claim: str, evidence_list: List[SearchResult]) -> str:
+    """构造普通助手式回复 Prompt，用于实验 B 组呈现。"""
+
+    evidence_text = format_evidence_list(evidence_list)
+    evidence_count = len(evidence_list)
+    current_date = datetime.now().strftime("%Y年%m月%d日")
+
+    return f"""今天是{current_date}。以下是一条用户信息及相关检索材料，请判断其可信度。
+
+用户信息：
+{claim}
+
+相关材料（{evidence_count}条）：
+{evidence_text}
+
+请用自然对话语气直接回复用户，不要使用任何Markdown格式标记。"""
+
 async def call_llm_api(
     prompt: str,
     zhipu_client,

@@ -1,7 +1,7 @@
 """
 Pydantic request/response models.
 """
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Literal
 from pydantic import BaseModel, Field
 
 
@@ -12,6 +12,11 @@ class FactCheckRequest(BaseModel):
     enable_link_validation: bool = Field(False, description="是否启用链接活性检测")
     enable_consistency_check: bool = Field(False, description="是否启用一致性评分")
     enable_evidence_chain: bool = Field(False, description="是否启用证据链生成")
+    response_mode: Literal["structured", "assistant"] = Field(
+        "structured",
+        description="结果呈现模式：structured 用于结构化插件，assistant 用于普通助手式回复"
+    )
+    news_id: Optional[int] = Field(None, description="新闻编号（用于预计算缓存匹配）")
 
 
 class FactCheckResponse(BaseModel):
@@ -21,6 +26,7 @@ class FactCheckResponse(BaseModel):
     search_keywords: str = Field(..., description="搜索关键词")
     uncertainty_note: str = Field(..., description="不确定性说明")
     reasoning: str = Field(..., description="推理过程说明")
+    assistant_reply: Optional[str] = Field(None, description="普通助手式回复（如果启用）")
     thinking_process: Optional[str] = Field(None, description="深度思考过程（如果启用）")
     link_validation: Optional[Dict[str, Any]] = Field(None, description="链接活性检测结果")
     consistency_score: Optional[Dict[str, Any]] = Field(None, description="一致性评分结果")

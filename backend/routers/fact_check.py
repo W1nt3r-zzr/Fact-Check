@@ -4,10 +4,14 @@ Fact-check route handlers: standard and streaming.
 import time
 import json
 import asyncio
+import hashlib
 import inspect
 import logging
+import os
 import re
-from typing import Any, AsyncIterator, List
+from datetime import datetime, timezone as dt_timezone
+from pathlib import Path
+from typing import Any, AsyncIterator, Dict, List, Optional
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException
@@ -16,7 +20,12 @@ from fastapi.responses import StreamingResponse
 from config import config, logger
 from models import FactCheckRequest, FactCheckResponse, SearchResult
 from services.search import SearchServiceError, _filter_irrelevant_results, _is_time_sensitive_claim, search_evidence
-from services.llm_service import build_llm_prompt, call_llm_api, sanitize_model_preamble
+from services.llm_service import (
+    build_assistant_llm_prompt,
+    build_llm_prompt,
+    call_llm_api,
+    sanitize_model_preamble,
+)
 from services.task_queue import FactCheckTaskQueue
 
 router = APIRouter()
@@ -32,6 +41,226 @@ _link_validator = None
 _consistency_scorer = None
 _evidence_chain_generator = None
 _task_queue = FactCheckTaskQueue(config.MAX_CONCURRENT_CHECKS)
+
+
+# ==================== 预计算缓存工具 ====================
+
+def _get_cache_dir() -> Path:
+    """获取预计算缓存目录，不存在则自动创建。"""
+    cache_dir = Path(config.PRECOMPUTE_CACHE_DIR)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
+
+
+def _load_cache(news_id: int) -> Optional[Dict]:
+    """按 news_id 加载预计算结果缓存。"""
+    cache_path = _get_cache_dir() / f"{news_id}.json"
+    if not cache_path.exists():
+        return None
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning(f"加载缓存失败 news_id={news_id}: {e}")
+        return None
+
+
+def _save_cache(news_id: int, data: Dict) -> None:
+    """保存预计算结果到缓存文件。"""
+    cache_path = _get_cache_dir() / f"{news_id}.json"
+    try:
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        logger.info(f"缓存已保存 news_id={news_id} -> {cache_path}")
+    except Exception as e:
+        logger.error(f"保存缓存失败 news_id={news_id}: {e}")
+
+
+def _build_claim_fingerprint(claim: str) -> str:
+    """对 claim 文本做规范化指纹，用于匹配。"""
+    normalized = re.sub(r"\s+", "", claim)
+    normalized = re.sub(
+        r"[，。！？、；：""''「」【】《》（）—…\-,.!?;:""''\[\]()\n]",
+        "",
+        normalized,
+    )
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+
+
+def _normalize_for_match(text: str) -> str:
+    """对文本做规范化（去空白、去标点、去换行），用于子串匹配和相似度计算。"""
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"[，。！？、；：""''「」【】《》（）—…\-,.!?;:""''\[\]()\n]", "", text)
+    return text.lower()
+
+
+def _jaccard_trigrams(a: str, b: str) -> float:
+    """计算两个字符串的 trigram Jaccard 相似度。"""
+    if not a or not b:
+        return 0.0
+    trigrams_a = {a[i:i+3] for i in range(len(a) - 2)}
+    trigrams_b = {b[i:i+3] for i in range(len(b) - 2)}
+    if not trigrams_a or not trigrams_b:
+        return 0.0
+    intersection = len(trigrams_a & trigrams_b)
+    union = len(trigrams_a | trigrams_b)
+    return intersection / union if union > 0 else 0.0
+
+
+def _find_cache_by_claim(claim: str) -> Optional[Dict]:
+    """多策略匹配预计算缓存。
+
+    按优先级依次尝试：
+    1. 完整 claim 指纹精确匹配
+    2. 缓存中的 title 指纹匹配（用户只粘贴了标题）
+    3. 缓存中的 body 指纹匹配（用户只粘贴了正文）
+    4. 用户粘贴的文本包含缓存 title（标题+正文混贴）
+    5. 缓存 title/body 包含用户粘贴的文本（只贴片段）
+    6. trigram Jaccard 相似度 > 0.5
+    """
+    fingerprint = _build_claim_fingerprint(claim)
+    normalized_claim = _normalize_for_match(claim)
+    cache_dir = _get_cache_dir()
+
+    all_caches = []
+    for cache_file in sorted(cache_dir.glob("*.json")):
+        try:
+            with open(cache_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            all_caches.append(data)
+        except Exception:
+            continue
+
+    if not all_caches:
+        return None
+
+    # 策略 1: 完整 claim 指纹精确匹配
+    for data in all_caches:
+        if data.get("claim_fingerprint") == fingerprint:
+            logger.info(f"缓存命中 (精确指纹): news_id={data.get('news_id')}")
+            return data
+
+    # 策略 2: title 指纹匹配
+    fingerprint_title = _build_claim_fingerprint(claim)
+    for data in all_caches:
+        if data.get("title_fingerprint") == fingerprint_title:
+            logger.info(f"缓存命中 (标题指纹): news_id={data.get('news_id')}")
+            return data
+
+    # 策略 3: body 指纹匹配
+    for data in all_caches:
+        if data.get("body_fingerprint") == fingerprint:
+            logger.info(f"缓存命中 (正文指纹): news_id={data.get('news_id')}")
+            return data
+
+    # 策略 4: 用户粘贴包含缓存 title 或正文
+    for data in all_caches:
+        cached_title = _normalize_for_match(data.get("title", ""))
+        cached_body = _normalize_for_match(data.get("body", ""))
+        if cached_title and cached_title in normalized_claim:
+            logger.info(f"缓存命中 (包含标题): news_id={data.get('news_id')}")
+            return data
+        if cached_body and cached_body in normalized_claim:
+            logger.info(f"缓存命中 (包含正文): news_id={data.get('news_id')}")
+            return data
+
+    # 策略 5: 缓存 title/body 包含用户粘贴文本
+    for data in all_caches:
+        cached_title = _normalize_for_match(data.get("title", ""))
+        cached_body = _normalize_for_match(data.get("body", ""))
+        if normalized_claim and (
+            (cached_title and normalized_claim in cached_title) or
+            (cached_body and normalized_claim in cached_body)
+        ):
+            logger.info(f"缓存命中 (被包含于缓存): news_id={data.get('news_id')}")
+            return data
+
+    # 策略 6: trigram Jaccard 相似度
+    best_match = None
+    best_score = 0.0
+    for data in all_caches:
+        for cached_key in ("title", "body", "claim"):
+            cached_text = _normalize_for_match(data.get(cached_key, ""))
+            if not cached_text:
+                continue
+            score = _jaccard_trigrams(normalized_claim, cached_text)
+            if score > best_score:
+                best_score = score
+                best_match = data
+
+    if best_score > 0.5:
+        logger.info(f"缓存命中 (Jaccard={best_score:.2f}): news_id={best_match.get('news_id')}")
+        return best_match
+
+    logger.info(f"缓存未命中 (最佳 Jaccard={best_score:.2f})")
+    return None
+
+
+def _get_precomputed_cache_for_request(request: FactCheckRequest) -> Optional[Dict]:
+    """Resolve precomputed playback cache, preferring explicit experiment news_id."""
+    if request.news_id:
+        cached = _load_cache(request.news_id)
+        if cached:
+            logger.info(f"预计算缓存命中 (news_id={request.news_id})")
+            return cached
+        logger.info(f"预计算缓存未命中 news_id={request.news_id}，降级到文本匹配")
+
+    return _find_cache_by_claim(request.claim)
+
+
+# ==================== 回放分块工具 ====================
+
+def _chunk_text(text: str, target_chars: int = 150) -> List[str]:
+    """按自然句边界切分文本，每块约 target_chars 字。
+
+    在 target_chars 附近寻找句号、换行等自然断点。
+    最少 10 块，最多 50 块，适配极短/极长内容。
+    """
+    if not text:
+        return []
+    if len(text) <= target_chars:
+        return [text]
+
+    chunks: List[str] = []
+    pos = 0
+    while pos < len(text):
+        end = min(pos + target_chars, len(text))
+        if end < len(text):
+            # 从 target_chars 位置向后搜索自然断点
+            for seek in range(end, max(pos + target_chars // 2, pos), -1):
+                if text[seek - 1] in "\n。！？.!?":
+                    end = seek
+                    break
+            else:
+                # 回退：在空格/逗号处断
+                for seek in range(end, max(pos + target_chars // 2, pos), -1):
+                    if text[seek - 1] in " ，,；;":
+                        end = seek
+                        break
+        chunks.append(text[pos:end])
+        pos = end
+
+    # 限制最少 10 块、最多 50 块
+    if len(chunks) < 10 and len(text) > target_chars * 5:
+        # 内容不足以自然分块达到 10 块，强制均分
+        force_size = max(1, len(text) // 10)
+        chunks = [text[i:i + force_size] for i in range(0, len(text), force_size)]
+    if len(chunks) > 50:
+        force_size = max(1, len(text) // 50)
+        chunks = [text[i:i + force_size] for i in range(0, len(text), force_size)]
+
+    return chunks
+
+
+def _extract_domain(url: str) -> str:
+    """从 URL 提取域名（去掉 www. 前缀）。"""
+    try:
+        parts = url.split("/")
+        if len(parts) > 2:
+            return parts[2].replace("www.", "")
+    except Exception:
+        pass
+    return url
 
 
 async def _resolve_maybe_awaitable(value: Any) -> Any:
@@ -91,6 +320,49 @@ def _normalize_core_host(host: str) -> str:
         if normalized.startswith(prefix):
             normalized = normalized[len(prefix):]
     return normalized
+
+
+def _clean_assistant_reply(text: str) -> str:
+    """Convert model output to plain assistant prose for the B-group UI."""
+    if not text:
+        return ""
+
+    cleaned = text.replace("\r\n", "\n").replace("\r", "\n")
+    cleaned = re.sub(r"```([\s\S]*?)```", r"\1", cleaned)
+    cleaned = re.sub(r"`([^`]+)`", r"\1", cleaned)
+    cleaned = re.sub(r"\*\*([^*]+)\*\*", r"\1", cleaned)
+    cleaned = re.sub(r"\*([^*\n]+)\*", r"\1", cleaned)
+    cleaned = re.sub(r"__([^_]+)__", r"\1", cleaned)
+    cleaned = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", cleaned)
+    cleaned = re.sub(r"^\s{0,3}#{1,6}\s*", "", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"^\s*[-*+]\s+", "", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"^\s*\d+[.)、]\s+", "", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(
+        r"^\s*【(?:开头摘要|核心事实提取|核心事实|深度洞察|与说法的精确对比|证据立场分析|证据关系分析|不确定性与局限|关键引用)】\s*",
+        "",
+        cleaned,
+        flags=re.MULTILINE,
+    )
+    cleaned = re.sub(
+        r"^\s*(?:开头摘要|核心事实提取|核心事实|深度洞察|与说法的精确对比|证据立场分析|证据关系分析|不确定性与局限|关键引用)\s*[:：]\s*",
+        "",
+        cleaned,
+        flags=re.MULTILINE,
+    )
+
+    paragraphs = []
+    seen = set()
+    for paragraph in re.split(r"\n{2,}|\n(?=\S)", cleaned):
+        normalized = re.sub(r"\s+", " ", paragraph).strip(" \t-:：")
+        if not normalized:
+            continue
+        dedupe_key = re.sub(r"\s+", "", normalized)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        paragraphs.append(normalized)
+
+    return "\n\n".join(paragraphs).strip()
 
 
 def _deduplicate_core_results(results: List[SearchResult]) -> List[SearchResult]:
@@ -366,6 +638,17 @@ async def fact_check_stream(request: FactCheckRequest):
                     yield f"event: progress\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
                     break
 
+            # === 缓存检测：命中预计算结果则启用 30 秒回放模式 ===
+            cached = _get_precomputed_cache_for_request(request)
+            if cached:
+                logger.info(f"流式核查命中预计算缓存 (指纹匹配 news_id={cached.get('news_id')})，启用 30s 回放")
+                # 释放队列槽位——回放不需要占用并发资源
+                await _task_queue.release(task_id)
+                acquired_queue_slot = False
+                async for event_str in _generate_paced_playback(cached, request.claim):
+                    yield event_str
+                return
+
             # 步骤1: 搜索证据
             yield await progress_event("searching", "正在联网搜索证据...")
             search_results = await search_evidence(request.claim)
@@ -381,7 +664,11 @@ async def fact_check_stream(request: FactCheckRequest):
             if not reasoning_results:
                 yield f"event: error\ndata: {{\"message\": \"未找到可用于核查的高相关近期证据\"}}\n\n"
                 return
-            prompt = build_llm_prompt(request.claim, reasoning_results)
+            prompt = (
+                build_assistant_llm_prompt(request.claim, reasoning_results)
+                if request.response_mode == "assistant"
+                else build_llm_prompt(request.claim, reasoning_results)
+            )
 
             # 步骤3: 流式调用LLM
             request_params = {
@@ -422,6 +709,11 @@ async def fact_check_stream(request: FactCheckRequest):
             full_content = sanitize_model_preamble(
                 _normalize_core_evidence_count_text(full_content, len(reasoning_results))
             )
+            assistant_reply = (
+                _clean_assistant_reply(full_content)
+                if request.response_mode == "assistant"
+                else ""
+            )
 
             yield await progress_event("processing", "正在生成证据链...")
 
@@ -460,6 +752,7 @@ async def fact_check_stream(request: FactCheckRequest):
                 result_data = {
                     "verdict": evidence_chain.verdict,
                     "reasoning": full_content,
+                    "assistant_reply": assistant_reply,
                     "thinking_process": thinking_content,
                     "evidence_chain": {
                         "supporting_evidence": evidence_chain.supporting_evidence,
@@ -477,7 +770,8 @@ async def fact_check_stream(request: FactCheckRequest):
             else:
                 result_data = {
                     "verdict": "信息不足，无法判断",
-                    "reasoning": full_content
+                    "reasoning": full_content,
+                    "assistant_reply": assistant_reply,
                 }
                 yield f"event: done\ndata: {json.dumps(result_data, ensure_ascii=False)}\n\n"
 
@@ -573,7 +867,11 @@ async def fact_check(request: FactCheckRequest):
             logger.info(f"链接验证完成: {validation_report['accessible_links']}/{validation_report['total_links']} 个链接可访问")
 
         # 步骤5: 构造推理Prompt
-        prompt = build_llm_prompt(request.claim, reasoning_results)
+        prompt = (
+            build_assistant_llm_prompt(request.claim, reasoning_results)
+            if request.response_mode == "assistant"
+            else build_llm_prompt(request.claim, reasoning_results)
+        )
 
         # 步骤6: 调用LLM进行推理
         reasoning_result = await call_llm_api(
@@ -587,6 +885,11 @@ async def fact_check(request: FactCheckRequest):
                 reasoning_result.get("reasoning", ""),
                 len(reasoning_results)
             )
+        )
+        assistant_reply = (
+            _clean_assistant_reply(reasoning_result.get("reasoning", ""))
+            if request.response_mode == "assistant"
+            else None
         )
 
         # 步骤7&8: 并行执行（一致性评分 + 证据链生成）
@@ -685,6 +988,7 @@ async def fact_check(request: FactCheckRequest):
             search_keywords=reasoning_result.get("search_keywords", request.claim),
             uncertainty_note=reasoning_result.get("uncertainty_note", "无"),
             reasoning=reasoning_result.get("reasoning", "推理过程未提供"),
+            assistant_reply=assistant_reply,
             thinking_process=reasoning_result.get("thinking_process"),
             link_validation=link_validation_result,
             consistency_score=consistency_result,
@@ -702,3 +1006,451 @@ async def fact_check(request: FactCheckRequest):
     finally:
         if acquired_queue_slot:
             await _task_queue.release(task_id)
+
+
+# ==================== 定时回放 SSE 生成器 ====================
+
+def _build_progress_event(stage: str, message: str, **extra) -> str:
+    """构建 progress SSE 事件字符串。"""
+    payload = {"stage": stage, "message": message, "queue": {}, **extra}
+    return f"event: progress\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _build_thinking_event(content: str, finished: bool = False) -> str:
+    """构建 thinking SSE 事件字符串。"""
+    payload = {"content": content, "finished": finished}
+    return f"event: thinking\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _build_content_event(content: str, finished: bool = False) -> str:
+    """构建 content SSE 事件字符串。"""
+    payload = {"content": content, "finished": finished}
+    return f"event: content\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+async def _generate_paced_playback(
+    cached: Dict,
+    claim: str,
+) -> AsyncIterator[str]:
+    """从预计算结果生成 ~30s 定时回放 SSE 事件流。
+
+    使用 time.monotonic() 绝对时钟，防止累积漂移。
+    """
+    t0 = time.monotonic()
+    TOTAL = config.PLAYBACK_TOTAL_DURATION
+    search_count = cached.get("search_count", 0)
+    core_count = cached.get("core_count", 0)
+    thinking_content = cached.get("thinking_content", "") or ""
+    full_content = cached.get("full_content", "") or ""
+    evidence_chain_data = cached.get("evidence_chain")
+    assistant_reply = cached.get("assistant_reply", "") or ""
+
+    async def _sleep_until(target_elapsed: float):
+        """休眠直到从 t0 起恰好经过 target_elapsed 秒。"""
+        delay = target_elapsed - (time.monotonic() - t0)
+        if delay > 0.001:
+            await asyncio.sleep(delay)
+
+    try:
+        # ===== Phase 1: 进度展示 (0 - 3.0s) =====
+        yield _build_progress_event("queue_started", "已进入核查流程。")
+        await _sleep_until(1.0)
+
+        yield _build_progress_event("searching", "正在联网搜索证据...")
+        await _sleep_until(2.0)
+
+        yield _build_progress_event(
+            "found",
+            f"检索到 {search_count} 个相关结果，正在基于其中 {core_count} 条核心证据分析...",
+        )
+        await _sleep_until(3.0)
+
+        # ===== Phase 2: 思考展示 (3.0 - 8.0s 或 3.0 - 5.0s) =====
+        has_thinking = bool(thinking_content and thinking_content.strip())
+
+        if has_thinking:
+            yield _build_progress_event("thinking_start", "AI 开始深度思考...")
+            thinking_chunks = _chunk_text(
+                thinking_content, config.PLAYBACK_THINKING_CHUNK_SIZE
+            )
+            thinking_end = 8.0
+            interval = (thinking_end - 3.0) / len(thinking_chunks) if thinking_chunks else 0.5
+            for i, chunk in enumerate(thinking_chunks):
+                await _sleep_until(3.0 + (i + 1) * interval)
+                yield _build_thinking_event(chunk)
+        else:
+            await _sleep_until(3.5)
+            yield _build_progress_event("thinking_start", "AI 开始深度思考...")
+            await _sleep_until(5.0)
+
+        # ===== Phase 3: 内容展示 (当前时间 - (TOTAL - 4.0)s) =====
+        content_start = time.monotonic() - t0
+        done_phase_duration = 4.0
+        content_end = max(content_start + 3.0, TOTAL - done_phase_duration)
+        content_duration = content_end - content_start
+
+        content_chunks = _chunk_text(full_content, config.PLAYBACK_CHUNK_SIZE)
+        interval = content_duration / len(content_chunks) if content_chunks else 1.0
+
+        for i, chunk in enumerate(content_chunks):
+            await _sleep_until(content_start + (i + 1) * interval)
+            yield _build_content_event(chunk)
+
+        # ===== Phase 4: 结果完成 (最后 4 秒) =====
+        await _sleep_until(TOTAL - 3.0)
+        yield _build_progress_event("processing", "正在生成证据链...")
+
+        await _sleep_until(TOTAL - 1.0)
+
+        # 构建 done 事件
+        if evidence_chain_data:
+            result_data = {
+                "verdict": evidence_chain_data.get("verdict", "信息不足，无法判断"),
+                "reasoning": full_content,
+                "assistant_reply": assistant_reply,
+                "thinking_process": thinking_content,
+                "evidence_chain": evidence_chain_data,
+            }
+        else:
+            result_data = {
+                "verdict": "信息不足，无法判断",
+                "reasoning": full_content,
+                "assistant_reply": assistant_reply,
+            }
+
+        yield f"event: done\ndata: {json.dumps(result_data, ensure_ascii=False)}\n\n"
+        await _sleep_until(TOTAL)
+
+    except Exception as e:
+        logger.error(f"回放生成器异常: {e}", exc_info=True)
+        yield f'event: error\ndata: {{"message": "{str(e)}"}}\n\n'
+
+
+# ==================== 回放核查端点（A组专用） ====================
+
+@router.post("/api/v1/check/playback")
+async def fact_check_playback(request: FactCheckRequest):
+    """预计算回放端点（A组 / plugin_structured 专用）。
+
+    从缓存读取预计算好的完整结果，按 ~30s 时间线分块发射 SSE 事件。
+    缓存未命中时降级到实时流式计算。
+    """
+    logger.info(f"开始回放核查 (news_id={request.news_id}): {request.claim[:80]}...")
+
+    async def generate():
+        try:
+            # --- 步骤 0: 查找缓存 ---
+            cached = _get_precomputed_cache_for_request(request)
+            if cached:
+                logger.info(f"回放命中缓存: news_id={cached.get('news_id')}")
+            if not cached:
+                logger.info("回放未命中缓存，降级到实时流式")
+
+            if cached:
+                # 缓存命中：走定时回放
+                async for event_str in _generate_paced_playback(cached, request.claim):
+                    yield event_str
+            else:
+                # 缓存未命中：降级到实时流式计算
+                # 复用现有流式端点逻辑（内联简化版）
+                task_id = _task_queue.create_task_id()
+                acquired = False
+                try:
+                    async for queue_snapshot in _task_queue.acquire(task_id):
+                        queue_data = queue_snapshot.to_dict()
+                        if queue_snapshot.state == "queued":
+                            payload = {
+                                "stage": "queued",
+                                "message": (
+                                    f"当前有 {queue_snapshot.running} 个核查任务正在运行，"
+                                    f"{queue_snapshot.queued} 个任务排队；你前面还有 "
+                                    f"{queue_snapshot.queued_ahead} 个任务。"
+                                ),
+                                "queue": queue_data,
+                            }
+                            yield f"event: progress\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                        else:
+                            acquired = True
+                            break
+
+                    yield _build_progress_event("searching", "正在联网搜索证据...")
+                    search_results = await search_evidence(request.claim)
+
+                    if not search_results:
+                        yield f'event: error\ndata: {{"message": "未找到相关搜索结果"}}\n\n'
+                        return
+
+                    yield _build_progress_event(
+                        "found",
+                        f"检索到 {len(search_results)} 个相关结果，正在筛选核心证据并分析...",
+                    )
+
+                    reasoning_results = _select_core_evidence(request.claim, search_results)
+                    if not reasoning_results:
+                        yield f'event: error\ndata: {{"message": "未找到可用于核查的高相关近期证据"}}\n\n'
+                        return
+
+                    prompt = build_llm_prompt(request.claim, reasoning_results)
+
+                    yield _build_progress_event("thinking_start", "AI 开始深度思考...")
+
+                    request_params = {
+                        "model": config.LLM_MODEL,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "temperature": 0.3,
+                        "max_tokens": 6000,
+                        "stream": True,
+                    }
+
+                    response = await _resolve_maybe_awaitable(
+                        _llm_client.chat.completions.create(**request_params)
+                    )
+
+                    full_content = ""
+                    thinking_content = ""
+
+                    async for chunk in _iterate_llm_stream(response):
+                        if chunk.choices and chunk.choices[0].delta:
+                            delta = chunk.choices[0].delta
+
+                            if hasattr(delta, "reasoning_content") and delta.reasoning_content:
+                                thinking_content += delta.reasoning_content
+                                yield _build_thinking_event(delta.reasoning_content)
+
+                            if hasattr(delta, "content") and delta.content:
+                                full_content += delta.content
+                                yield _build_content_event(delta.content)
+
+                    if not full_content and thinking_content:
+                        full_content = thinking_content
+
+                    full_content = sanitize_model_preamble(
+                        _normalize_core_evidence_count_text(full_content, len(reasoning_results))
+                    )
+
+                    yield _build_progress_event("processing", "正在生成证据链...")
+
+                    # 生成证据链
+                    evidence_chain_data = None
+                    if request.enable_evidence_chain:
+                        search_results_dicts = [
+                            {"title": r.name, "url": r.url, "summary": r.summary, "date_published": r.date_published}
+                            for r in reasoning_results
+                        ]
+                        all_search_results_dicts = [
+                            {"title": r.name, "url": r.url, "domain": r.source or _extract_domain(r.url)}
+                            for r in search_results
+                        ]
+                        evidence_chain = await _evidence_chain_generator.generate_evidence_chain(
+                            claim=request.claim,
+                            search_results=search_results_dicts,
+                            enable_link_validation=request.enable_link_validation,
+                            top_k=len(reasoning_results),
+                            reasoning_text=full_content,
+                            total_search_results=len(search_results),
+                            all_search_results=all_search_results_dicts,
+                        )
+                        evidence_chain_data = {
+                            "supporting_evidence": evidence_chain.supporting_evidence,
+                            "opposing_evidence": evidence_chain.opposing_evidence,
+                            "neutral_evidence": evidence_chain.neutral_evidence,
+                            "total_evidence": evidence_chain.total_evidence,
+                            "total_search_results": evidence_chain.total_search_results,
+                            "reasoning_summary": evidence_chain.reasoning_summary,
+                            "ai_summary": evidence_chain.ai_summary,
+                            "all_search_results": getattr(evidence_chain, "all_search_results", []),
+                        }
+
+                    result_data = {
+                        "verdict": evidence_chain.verdict if evidence_chain_data else "信息不足，无法判断",
+                        "reasoning": full_content,
+                        "assistant_reply": "",
+                        "thinking_process": thinking_content,
+                    }
+                    if evidence_chain_data:
+                        result_data["evidence_chain"] = evidence_chain_data
+
+                    yield f"event: done\ndata: {json.dumps(result_data, ensure_ascii=False)}\n\n"
+
+                except SearchServiceError as e:
+                    logger.error(f"搜索服务不可用: {e}")
+                    yield f'event: error\ndata: {json.dumps({"message": str(e)}, ensure_ascii=False)}\n\n'
+                except Exception as e:
+                    logger.error(f"实时核查失败: {e}", exc_info=True)
+                    yield f'event: error\ndata: {{"message": "{str(e)}"}}\n\n'
+                finally:
+                    if acquired:
+                        await _task_queue.release(task_id)
+
+        except Exception as e:
+            logger.error(f"回放核查失败: {e}", exc_info=True)
+            yield f'event: error\ndata: {{"message": "{str(e)}"}}\n\n'
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ==================== 预计算端点（管理员用） ====================
+
+from pydantic import BaseModel as _PydanticBaseModel, Field as _Field
+
+
+class PrecomputeItem(_PydanticBaseModel):
+    news_id: int = _Field(ge=1, description="新闻编号 1-6")
+    claim: str = _Field(min_length=1, max_length=2000, description="待核查的说法文本（用于 LLM 分析）")
+    title: str = _Field(default="", max_length=500, description="新闻标题（用于模糊匹配）")
+    body: str = _Field(default="", max_length=2000, description="新闻正文（用于模糊匹配）")
+
+
+class PrecomputeRequest(_PydanticBaseModel):
+    items: List[PrecomputeItem] = _Field(min_length=1, max_length=20)
+
+
+class PrecomputeItemResult(_PydanticBaseModel):
+    news_id: int
+    status: str  # "success" | "failed"
+    elapsed_seconds: float
+    search_count: int = 0
+    core_count: int = 0
+    error: str = ""
+
+
+class PrecomputeResponse(_PydanticBaseModel):
+    total_seconds: float
+    results: List[PrecomputeItemResult]
+
+
+@router.post("/api/v1/admin/precompute", response_model=PrecomputeResponse)
+async def admin_precompute(payload: PrecomputeRequest):
+    """预计算端点：对指定新闻列表执行完整核查 pipeline 并缓存结果。
+
+    实验前一次性调用，将 6 条新闻的核查结果全部预计算好。
+    """
+    import time as _time
+
+    overall_start = _time.monotonic()
+    results: List[PrecomputeItemResult] = []
+
+    for item in payload.items:
+        item_start = _time.monotonic()
+        try:
+            logger.info(f"预计算开始 news_id={item.news_id}: {item.claim[:80]}...")
+
+            # Step 1: 搜索
+            search_results = await search_evidence(item.claim)
+            if not search_results:
+                raise ValueError("未找到相关搜索结果")
+
+            # Step 2: 核心证据筛选
+            reasoning_results = _select_core_evidence(item.claim, search_results)
+            if not reasoning_results:
+                raise ValueError("未找到可用于核查的高相关近期证据")
+
+            # Step 3: 构造 Prompt（A组用结构化 prompt）
+            prompt = build_llm_prompt(item.claim, reasoning_results)
+
+            # Step 4: LLM 调用（非流式，启用思考）
+            request_params = {
+                "model": config.LLM_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.3,
+                "max_tokens": 6000,
+                "stream": False,
+            }
+
+            response = await _resolve_maybe_awaitable(
+                _llm_client.chat.completions.create(**request_params)
+            )
+
+            message = response.choices[0].message
+            full_content = message.content or ""
+            thinking_content = getattr(message, "reasoning_content", None) or ""
+
+            if not full_content and thinking_content:
+                full_content = thinking_content
+
+            full_content = sanitize_model_preamble(
+                _normalize_core_evidence_count_text(full_content, len(reasoning_results))
+            )
+
+            # Step 5: 证据链生成
+            search_results_dicts = [
+                {"title": r.name, "url": r.url, "summary": r.summary, "date_published": r.date_published}
+                for r in reasoning_results
+            ]
+            all_search_results_dicts = [
+                {"title": r.name, "url": r.url, "domain": r.source or _extract_domain(r.url)}
+                for r in search_results
+            ]
+
+            evidence_chain = await _evidence_chain_generator.generate_evidence_chain(
+                claim=item.claim,
+                search_results=search_results_dicts,
+                enable_link_validation=False,
+                top_k=len(reasoning_results),
+                reasoning_text=full_content,
+                total_search_results=len(search_results),
+                all_search_results=all_search_results_dicts,
+            )
+
+            # Step 6: 组装缓存数据
+            cache_data = {
+                "news_id": item.news_id,
+                "claim": item.claim,
+                "title": item.title or "",
+                "body": item.body or "",
+                "claim_fingerprint": _build_claim_fingerprint(item.claim),
+                "title_fingerprint": _build_claim_fingerprint(item.title) if item.title else "",
+                "body_fingerprint": _build_claim_fingerprint(item.body) if item.body else "",
+                "precomputed_at": datetime.now(dt_timezone.utc).isoformat(),
+                "search_count": len(search_results),
+                "core_count": len(reasoning_results),
+                "thinking_content": thinking_content,
+                "full_content": full_content,
+                "assistant_reply": "",
+                "evidence_chain": {
+                    "verdict": evidence_chain.verdict,
+                    "supporting_evidence": evidence_chain.supporting_evidence,
+                    "opposing_evidence": evidence_chain.opposing_evidence,
+                    "neutral_evidence": evidence_chain.neutral_evidence,
+                    "total_evidence": evidence_chain.total_evidence,
+                    "total_search_results": evidence_chain.total_search_results,
+                    "reasoning_summary": evidence_chain.reasoning_summary,
+                    "ai_summary": evidence_chain.ai_summary,
+                    "all_search_results": getattr(evidence_chain, "all_search_results", []),
+                },
+            }
+
+            _save_cache(item.news_id, cache_data)
+
+            elapsed = _time.monotonic() - item_start
+            results.append(PrecomputeItemResult(
+                news_id=item.news_id,
+                status="success",
+                elapsed_seconds=round(elapsed, 1),
+                search_count=len(search_results),
+                core_count=len(reasoning_results),
+            ))
+            logger.info(f"预计算完成 news_id={item.news_id}, 耗时 {elapsed:.1f}s")
+
+        except Exception as e:
+            elapsed = _time.monotonic() - item_start
+            logger.error(f"预计算失败 news_id={item.news_id}: {e}", exc_info=True)
+            results.append(PrecomputeItemResult(
+                news_id=item.news_id,
+                status="failed",
+                elapsed_seconds=round(elapsed, 1),
+                error=str(e),
+            ))
+
+    total_elapsed = _time.monotonic() - overall_start
+    logger.info(f"全部预计算完成，总耗时 {total_elapsed:.1f}s，成功 {sum(1 for r in results if r.status == 'success')}/{len(results)}")
+
+    return PrecomputeResponse(total_seconds=round(total_elapsed, 1), results=results)

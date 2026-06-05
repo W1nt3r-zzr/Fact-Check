@@ -159,6 +159,42 @@ def _is_recent_claim(claim: str) -> bool:
     )
 
 
+def _is_policy_or_institutional_claim(claim: str) -> bool:
+    """识别纯政策/制度/福利/公告类名词短语——这些不是突发事件，不应被 45 天
+    stale 窗口截断证据。典型例子：「育儿补贴」「养老金调整」「高考加分政策」。"""
+    text = claim or ""
+
+    # 政策/制度/福利/公告类主题词
+    policy_topic_terms = [
+        '补贴', '补助', '津贴', '救助', '养老金', '社保', '医保', '税收',
+        '税率', '政策', '制度', '法规', '条例', '办法', '规定', '通知',
+        '放假', '调休', '假期', '考试', '招生', '分数线', '录取',
+        '规划', '计划', '方案', '标准', '国标', '行标',
+        '任命', '任免', '换届', '当选', '预算',
+        '公积金', '住房补贴', '租房补贴', '购房补贴', '生育补贴', '育儿补贴',
+        '托育', '学前教育', '义务教育', '双减',
+    ]
+    if any(term in text for term in policy_topic_terms):
+        return True
+
+    # 政府主体 + 无事件动词 → 大概率是政策查询
+    government_subjects = [
+        '国务院', '教育部', '人社部', '财政部', '卫健委', '医保局',
+        '发改委', '民政部', '住建部', '交通部', '农业部',
+        '省政府', '市政府', '县政府',
+    ]
+    has_gov_subject = any(subj in text for subj in government_subjects)
+    has_event_verb = any(
+        verb in text
+        for verb in ['发生', '爆发', '起火', '事故', '回应', '辟谣', '通报',
+                     '处罚', '调查', '起诉', '判刑']
+    )
+    if has_gov_subject and not has_event_verb:
+        return True
+
+    return False
+
+
 def _is_event_claim(claim: str) -> bool:
     """识别新闻/监管/动态事实类说法，即使没有显式时间词也应优先近期证据。"""
     event_terms = [
@@ -183,6 +219,12 @@ def _is_event_claim(claim: str) -> bool:
     # 含"宣布/发布"的正式公告类（它们已在 _contains_dynamic_announcement
     # 的白名单中被排除），避免"国务院宣布放假"被 stale 过滤。
     if _has_formal_announcement_verb(claim):
+        return False
+
+    # 纯政策/制度/福利类名词短语不带事件动词时，不应按突发事件处理。
+    # 这些主题的核心证据往往是官方公告、政策文件、长期制度安排，
+    # 45 天 stale 窗口会错误地把官方原始公告过滤掉。
+    if _is_policy_or_institutional_claim(claim):
         return False
 
     return not _is_stable_science_or_common_claim(claim)
@@ -846,6 +888,22 @@ def _compute_relevance(claim: str, result: SearchResult) -> float:
         score *= 0.3
         logger.debug(f"标题低相关惩罚: [{title_ratio:.0%}] {title[:50]}")
 
+    # 5. 领域锚点检查：claim 中的行业/领域特指词（非"调整""制度"等跨行业通用词）
+    #    若全部未命中 → 大概率是其他行业的同义词匹配（如"医生值班调整"匹配到"网约车排班调整"）
+    CROSS_DOMAIN_GENERIC_TERMS = {
+        '调整', '改革', '修改', '改变', '更新', '升级', '优化', '改进',
+        '值班', '排班', '作息', '安排', '调休', '轮班', '换班',
+        '制度', '方案', '通知', '规定', '政策', '管理', '标准', '规则', '办法',
+        '宣布', '发布', '公布', '实施', '执行', '落实',
+        '最新', '消息', '新闻', '报道', '热点', '关注',
+    }
+    domain_anchors = [kw for kw in unique_kw if kw not in CROSS_DOMAIN_GENERIC_TERMS]
+    if domain_anchors:
+        anchor_hits = sum(1 for anchor in domain_anchors if anchor in text)
+        if anchor_hits == 0:
+            score *= 0.35
+            logger.debug(f"领域锚点未命中惩罚: anchors={domain_anchors[:5]} {title[:50]}")
+
     return max(0, score)
 
 
@@ -911,7 +969,9 @@ def _is_stale_for_recent_claim(claim: str, result: SearchResult) -> bool:
     stale_window_days = 45
     text_years = _extract_years_from_text(f"{result.name} {result.summary}")
     current_year = date.today().year
-    if text_years and max(text_years) < current_year:
+    # 宽松年份门槛：仅当文本中所有年份都比当前年份早 2 年及以上时才判 stale。
+    # 去年底发布的政策/新闻（如 2025 年底的政策原文在 2026 年初被核查）不应被误杀。
+    if text_years and max(text_years) < current_year - 1:
         return True
     return age_days > stale_window_days
 

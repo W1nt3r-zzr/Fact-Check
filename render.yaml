@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: fact-check-backend
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: LLM_API_KEY
+        sync: false
+      - key: LLM_MODEL
+        value: deepseek-v4-pro
+      - key: LLM_BASE_URL
+        value: https://api.deepseek.com
+      - key: BOCHA_API_KEY
+        sync: false
+    plan: free

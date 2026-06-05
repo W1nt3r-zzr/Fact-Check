@@ -10,6 +10,7 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from models import FactCheckRequest, SearchResult
 from routers import fact_check as fact_check_router
+from scripts import precompute_news
 
 
 def _result(idx: int) -> SearchResult:
@@ -46,6 +47,21 @@ def _hsw_result(name: str, path: str) -> SearchResult:
 
 
 class FactCheckEvidenceLimitTests(unittest.IsolatedAsyncioTestCase):
+    async def test_precomputed_cache_prefers_news_id_over_unmatched_claim(self):
+        request = FactCheckRequest(
+            claim="标题和正文选区混入了页面提示文字，不能靠文本指纹稳定匹配",
+            news_id=3,
+            enable_evidence_chain=True,
+        )
+
+        with patch.object(fact_check_router, "_load_cache", return_value={"news_id": 3}) as load_cache, \
+             patch.object(fact_check_router, "_find_cache_by_claim") as find_cache:
+            cached = fact_check_router._get_precomputed_cache_for_request(request)
+
+        self.assertEqual(cached, {"news_id": 3})
+        load_cache.assert_called_once_with(3)
+        find_cache.assert_not_called()
+
     async def test_stream_iterator_accepts_regular_sync_stream(self):
         chunks = [SimpleNamespace(value="a"), SimpleNamespace(value="b")]
 
@@ -248,6 +264,78 @@ class FactCheckEvidenceLimitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(selected), fact_check_router.HOMOGENEOUS_EVIDENCE_PER_CLUSTER)
         self.assertEqual([item.name for item in selected], [item.name for item in fresh_results[:3]])
         self.assertNotIn(stale_history.name, [item.name for item in selected])
+
+    async def test_core_evidence_selection_drops_low_quality_stale_supporting_claims(self):
+        authoritative_debunks = [
+            SearchResult(
+                name=f"黄鳝养殖喂避孕药? 这是传了近30年的谣言-{idx}",
+                url=f"https://www.piyao.org.cn/20260507/example-{idx}.html",
+                summary=(
+                    "专家介绍，黄鳝自带性逆转特性，使用避孕药不仅没法催长黄鳝，"
+                    "还会导致大量死亡、体态畸形，养殖户根本不会这么做。"
+                ),
+                date_published="2026-05-07T00:00:00+08:00",
+                source="中国互联网联合辟谣平台",
+            )
+            for idx in range(5)
+        ]
+        stale_low_quality_support = SearchResult(
+            name="水产业滥用避孕药或影响人类生育",
+            url="http://www.360doc.cn/article/759083_116107745.html",
+            summary=(
+                "江苏一名水产养殖从业人士透露，使用避孕药可让黄鳝上市周期缩短一半，"
+                "并且每条重量要比没有用的重1~2两左右。"
+            ),
+            date_published="2011-05-12T08:00:00+08:00",
+            source="360doc.cn",
+        )
+
+        selected = fact_check_router._select_core_evidence(
+            "黄鳝养殖大量使用避孕药，市场上买到的黄鳝都不安全",
+            [stale_low_quality_support] + authoritative_debunks,
+        )
+
+        selected_titles = [item.name for item in selected]
+        self.assertNotIn(stale_low_quality_support.name, selected_titles)
+        self.assertTrue(selected_titles)
+        self.assertTrue(all("谣言" in title for title in selected_titles))
+
+    async def test_precompute_core_filter_reuses_strict_quality_gates(self):
+        stale_low_quality_support = {
+            "name": "水产业滥用避孕药或影响人类生育",
+            "url": "http://www.360doc.cn/article/759083_116107745.html",
+            "summary": (
+                "江苏一名水产养殖从业人士透露，使用避孕药可让黄鳝上市周期缩短一半，"
+                "并且每条重量要比没有用的重1~2两左右。"
+            ),
+            "date_published": "2011-05-12T08:00:00+08:00",
+            "source": "360doc.cn",
+            "_rel_score": 0.99,
+        }
+        authoritative_debunks = [
+            {
+                "name": f"黄鳝养殖喂避孕药? 这是传了近30年的谣言-{idx}",
+                "url": f"https://www.piyao.org.cn/20260507/example-{idx}.html",
+                "summary": (
+                    "专家介绍，黄鳝自带性逆转特性，使用避孕药不仅没法催长黄鳝，"
+                    "还会导致大量死亡、体态畸形，养殖户根本不会这么做。"
+                ),
+                "date_published": "2026-05-07T00:00:00+08:00",
+                "source": "中国互联网联合辟谣平台",
+                "_rel_score": 0.4,
+            }
+            for idx in range(5)
+        ]
+
+        selected = precompute_news._simple_core_filter(
+            "黄鳝养殖大量使用避孕药，市场上买到的黄鳝都不安全",
+            [stale_low_quality_support] + authoritative_debunks,
+        )
+
+        selected_titles = [item["name"] for item in selected]
+        self.assertNotIn(stale_low_quality_support["name"], selected_titles)
+        self.assertTrue(selected_titles)
+        self.assertTrue(all("谣言" in title for title in selected_titles))
 
     async def test_core_evidence_selection_prefers_authoritative_same_fact_over_early_reposts(self):
         reposts = [

@@ -33,5 +33,14 @@ class Config:
     PORT = int(os.getenv("PORT", "8000"))
     MAX_CONCURRENT_CHECKS = int(os.getenv("MAX_CONCURRENT_CHECKS", "2"))
 
+    # 预计算回放配置（A组 / plugin_structured）
+    PLAYBACK_TOTAL_DURATION: float = float(os.getenv("PLAYBACK_TOTAL_DURATION", "30.0"))
+    PLAYBACK_CHUNK_SIZE: int = int(os.getenv("PLAYBACK_CHUNK_SIZE", "150"))
+    PLAYBACK_THINKING_CHUNK_SIZE: int = int(os.getenv("PLAYBACK_THINKING_CHUNK_SIZE", "100"))
+    PRECOMPUTE_CACHE_DIR: str = os.getenv(
+        "PRECOMPUTE_CACHE_DIR",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
+    )
+
 
 config = Config()
