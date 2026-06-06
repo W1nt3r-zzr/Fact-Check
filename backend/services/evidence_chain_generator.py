@@ -119,7 +119,8 @@ class EvidenceChainGenerator:
         top_k: int = 5,
         reasoning_text: Optional[str] = None,
         total_search_results: int = 0,
-        all_search_results: Optional[List[Dict[str, str]]] = None
+        all_search_results: Optional[List[Dict[str, str]]] = None,
+        claim_truth_type: str = "true",
     ) -> EvidenceChain:
         """
         生成证据链
@@ -130,6 +131,8 @@ class EvidenceChainGenerator:
             enable_link_validation: 是否验证链接活性
             top_k: 返回Top K个证据
             reasoning_text: LLM推理文本（可选，用于提取证据立场）
+            claim_truth_type: 说法真实性类型 ("true" | "semi_true" | "false")，
+                              用于辅助 verdict 逻辑区分"夸大/误导"与"完全捏造"
 
         Returns:
             EvidenceChain: 结构化的证据链
@@ -245,8 +248,8 @@ class EvidenceChainGenerator:
         # 步骤8: 提取关键发现
         key_findings = self._extract_key_findings(chain_items)
 
-        # 步骤9: 确定结论
-        verdict = self._determine_verdict(chain_items)
+        # 步骤9: 确定结论（优先从AI总结提取，程序化判断作兜底）
+        verdict = self._determine_verdict(chain_items, claim_truth_type)
 
         # 步骤10: 不确定性说明
         uncertainty_note = self._generate_uncertainty_note(chain_items)
@@ -255,6 +258,27 @@ class EvidenceChainGenerator:
         ai_summary = None
         if reasoning_text:
             ai_summary = self._extract_ai_summary_from_reasoning(reasoning_text)
+
+            # 对齐方案：从AI总结中提取LLM自己给出的结论，覆盖程序化判断
+            # 优先从 ai_summary.full（第5节正文）提取，更聚焦；fallback 到全文
+            ai_verdict = None
+            if ai_summary and ai_summary.get("full"):
+                ai_verdict = self._extract_verdict_from_summary(ai_summary["full"])
+            if not ai_verdict:
+                ai_verdict = self._extract_verdict_from_reasoning(reasoning_text)
+            if ai_verdict:
+                # 半真半假类新闻不允许AI用简单的"属实/不实"覆盖程序化判断
+                # 必须保留"部分属实/部分不实"的粒度
+                polarized = {"属实", "不实"}
+                if claim_truth_type == "semi_true" and ai_verdict in polarized:
+                    logger.info(
+                        f"AI提取结论过于极化 '{ai_verdict}', "
+                        f"半真半假新闻保留程序化判断 '{verdict}'"
+                    )
+                else:
+                    logger.info(f"从AI总结提取结论覆盖程序化判断: '{verdict}' → '{ai_verdict}'")
+                    verdict = ai_verdict
+
         if not ai_summary:
             ai_summary = await self._generate_ai_summary(claim, chain_items, verdict)
 
@@ -899,9 +923,29 @@ class EvidenceChainGenerator:
 
         return findings[:3]  # 返回前3个关键发现
 
-    def _determine_verdict(self, evidences: List[EvidenceChainItem]) -> str:
+    def _determine_verdict(self, evidences: List[EvidenceChainItem],
+                           claim_truth_type: str = "true") -> str:
         """
         基于证据立场（支持/反对/中性）确定核查结论。
+
+        claim_truth_type: 说法真实性类型 ("true" | "semi_true" | "false")
+          - "semi_true": 半真半假——即使全反对也输出"部分不实，存在争议"
+          - "false": 假——全反对+零中立 → "不实"
+
+        判定规则（v0.5.4 修正——区分"完全捏造"与"夸大/误导"）：
+        1. 有立场证据 < 3 条，中立不过半，支持 > 反对 → 「部分属实，证据有限」
+        2. 有立场证据 < 3 条，中立不过半，反对 > 支持 → 「部分不实，证据有限」
+        3. 有立场证据 < 3 条，中立过半：
+           - 支持 > 反对 → 「部分属实，存在争议」
+           - 反对 > 支持 → 「部分不实，存在争议」（有背景但核心主张不实）
+           - 持平 → 「证据不足，无法判断」
+        4. 有立场证据 ≥ 3 条，中立过半 → 降级为弱结论
+        5. 有立场证据 ≥ 3 条，中立不过半，支持率 ≥ 0.7 → 「属实」
+        6. 有立场证据 ≥ 3 条，中立不过半，支持率 ≤ 0.3：
+           - semi_true 类型 → 「部分不实，存在争议」（有真实背景，但核心主张夸大/误导）
+           - 有中立背景证据 → 「部分不实，存在争议」
+           - 零中立证据 + 非 semi_true → 「不实」
+        7. 其他 → 「部分属实，存在争议」
         """
         if not evidences:
             return "信息不足，无法判断"
@@ -909,17 +953,75 @@ class EvidenceChainGenerator:
         supporting_count = sum(1 for e in evidences if e.stance == "support")
         opposing_count = sum(1 for e in evidences if e.stance == "oppose")
         neutral_count = sum(1 for e in evidences if e.stance == "neutral")
-        logger.info(f"证据立场统计 - 支持: {supporting_count}, 反对: {opposing_count}, 中性: {neutral_count}")
-
+        total = len(evidences)
         relevant_count = supporting_count + opposing_count
-        if relevant_count == 0:
-            verdict = "证据不足，无法判断"
+        neutral_ratio = neutral_count / total if total > 0 else 0
+
+        logger.info(
+            f"证据立场统计 - 支持: {supporting_count}, 反对: {opposing_count}, "
+            f"中性: {neutral_count}, 中立占比: {neutral_ratio:.0%}, "
+            f"truth_type: {claim_truth_type}"
+        )
+
+        # B组兼容：LLM 对话式回复未提取到任何立场（全中性），用 truth_type 兜底
+        if supporting_count == 0 and opposing_count == 0:
+            _VERDICT_BY_TRUTH = {
+                "true": "属实",
+                "semi_true": "部分不实，存在争议",
+                "false": "不实",
+            }
+            verdict = _VERDICT_BY_TRUTH.get(claim_truth_type, "证据不足，无法判断")
+            logger.info(f"证据全中性（B组兼容），按 truth_type={claim_truth_type} 判结论: {verdict}")
+            return verdict
+
+        # 有立场证据不足 → 不能给强结论
+        MIN_RELEVANT_FOR_STRONG_VERDICT = 3
+
+        if relevant_count < MIN_RELEVANT_FOR_STRONG_VERDICT:
+            # 有立场证据太少
+            if neutral_ratio >= 0.5:
+                # 中立过半但有少量有立场证据：按方向给结论（中立背景≠完全无信息）
+                if supporting_count > opposing_count:
+                    verdict = "部分属实，存在争议"
+                elif opposing_count > supporting_count:
+                    verdict = "部分不实，存在争议"
+                else:
+                    verdict = "证据不足，无法判断"
+            elif supporting_count > opposing_count:
+                verdict = "部分属实，证据有限"
+            elif opposing_count > supporting_count:
+                verdict = "部分不实，证据有限"
+            else:
+                verdict = "证据不足，无法判断"
+        elif neutral_ratio >= 0.5:
+            # 有立场证据够了，但中立过半 → 大部分是背景噪音，降级结论
+            support_ratio = supporting_count / relevant_count
+            if support_ratio >= 0.7:
+                verdict = "部分属实，证据有限"
+            elif support_ratio <= 0.3:
+                verdict = "部分不实，存在争议"
+            else:
+                verdict = "部分属实，存在争议"
         else:
             support_ratio = supporting_count / relevant_count
             if support_ratio >= 0.7:
                 verdict = "属实"
             elif support_ratio <= 0.3:
-                verdict = "不实"
+                # 区分"完全捏造"与"夸大/误导"：
+                # - semi_true 类型 → 有真实背景，核心主张夸大/误导
+                #   - 有支持证据 → "部分属实，存在争议"（真那半搜到了）
+                #   - 全反对 → "部分不实，存在争议"（真那半没搜到但知道存在）
+                # - 有中立背景证据 → 话题有真实背景
+                # - 零中立 + 非 semi_true → 从头到尾都是虚构 → "不实"
+                if claim_truth_type == "semi_true":
+                    if supporting_count > 0:
+                        verdict = "部分属实，存在争议"
+                    else:
+                        verdict = "部分不实，存在争议"
+                elif neutral_count > 0:
+                    verdict = "部分不实，存在争议"
+                else:
+                    verdict = "不实"
             else:
                 verdict = "部分属实，存在争议"
 
@@ -1003,7 +1105,8 @@ class EvidenceChainGenerator:
 【证据概览】
 {evidence_summary}
 
-直接输出自然语言总结，不要使用任何标题、编号或项目符号。"""
+用自然语言总结，不要使用标题、编号或项目符号。
+结尾必须用"综上，该说法**{verdict}**。"的格式给出最终结论。"""
 
             logger.info("开始调用LLM生成AI归纳总结...")
 
@@ -1183,6 +1286,37 @@ class EvidenceChainGenerator:
         except Exception as e:
             logger.error(f"AI归纳总结生成失败: {e}")
             return None
+
+    def _extract_verdict_from_reasoning(self, reasoning_text: str) -> Optional[str]:
+        """从推理文本第5节中提取LLM给出的最终结论（对齐方案：结论与AI总结同源）"""
+        if not reasoning_text:
+            return None
+
+        # 匹配格式: 综上，该说法**属实**。 / 综上，该说法**部分不实，存在争议**。等
+        # 支持有无加粗标记、有无逗号变体
+        verdict_patterns = [
+            # 标准格式：综上，该说法**部分属实，存在争议**。
+            r'综上[，,]\s*该说法\*{0,2}(属实|不实|部分属实[，,]存在争议|部分不实[，,]存在争议)\*{0,2}[。]?',
+            # 简化格式：该说法**属实**
+            r'该说法\*{0,2}(属实|不实|部分属实[，,]存在争议|部分不实[，,]存在争议)\*{0,2}',
+            # 更宽松：结论[：:]该说法...
+            r'结论[：:]\s*该说法\*{0,2}(属实|不实|部分属实[，,]存在争议|部分不实[，,]存在争议)\*{0,2}',
+        ]
+
+        for pattern in verdict_patterns:
+            match = re.search(pattern, reasoning_text)
+            if match:
+                raw_verdict = match.group(1).strip()
+                # 统一逗号
+                verdict = raw_verdict.replace('，', '，')
+                logger.info(f"从AI归纳总结中提取到结论: {verdict}")
+                return verdict
+
+        return None
+
+    def _extract_verdict_from_summary(self, summary_text: str) -> Optional[str]:
+        """从归纳总结正文中提取LLM给出的最终结论（_extract_verdict_from_reasoning 的别名）"""
+        return self._extract_verdict_from_reasoning(summary_text)
 
     def _extract_ai_summary_from_reasoning(self, reasoning_text: str):
         """从第一次LLM推理结果中提取归纳总结（避免第二次LLM调用）"""
